@@ -1,0 +1,233 @@
+/* =====================================================
+   WordPress AI SEO + GEO 智能优化插件 — 后台样式
+   ===================================================== */
+
+/* 卡片容器 */
+.waisg-settings-wrap .waisg-card,
+.wrap .waisg-card {
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-radius: 4px;
+    padding: 20px 24px;
+    margin-bottom: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.05);
+}
+.waisg-card h2 {
+    margin-top: 0;
+    padding-bottom: 10px;
+    border-bottom: 1px solid #f0f0f1;
+    font-size: 14px;
+    font-weight: 600;
+}
+
+/* 元框主体 */
+#waisg-box {
+    padding: 4px 0;
+}
+#waisg-box .waisg-section {
+    margin-bottom: 16px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid #f0f0f1;
+}
+#waisg-box .waisg-section:last-child {
+    border-bottom: none;
+    margin-bottom: 0;
+}
+#waisg-box h3 {
+    margin: 0 0 10px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #1d2327;
+}
+
+/* 表格 */
+.waisg-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+.waisg-table td {
+    padding: 5px 8px 5px 0;
+    vertical-align: middle;
+}
+.waisg-table td:first-child {
+    width: 80px;
+    font-size: 12px;
+    color: #646970;
+    white-space: nowrap;
+}
+.waisg-table input[type="text"],
+.waisg-table input[type="number"],
+.waisg-table textarea {
+    width: 100%;
+}
+
+/* 按钮组 */
+.waisg-btn {
+    margin-bottom: 8px !important;
+}
+.waisg-single-btns {
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+.waisg-single-btns .waisg-label {
+    font-size: 12px;
+    color: #646970;
+    margin-right: 4px;
+}
+.waisg-btn-single {
+    font-size: 12px !important;
+    height: 28px !important;
+    line-height: 26px !important;
+    padding: 0 10px !important;
+}
+
+/* SEO 区域 */
+.waisg-seo-section .waisg-table td:first-child {
+    width: 90px;
+}
+.waisg-char-count {
+    font-size: 11px;
+    color: #646970;
+    margin-left: 6px;
+}
+
+/* 状态栏 */
+.waisg-status {
+    padding: 8px 12px;
+    border-radius: 3px;
+    font-size: 13px;
+    margin: 10px 0;
+}
+.waisg-status-loading {
+    background: #f0f6fc;
+    border-left: 3px solid #0073aa;
+    color: #0073aa;
+}
+.waisg-status-success {
+    background: #f0faf0;
+    border-left: 3px solid #00a32a;
+    color: #00a32a;
+}
+.waisg-status-error {
+    background: #fef7f7;
+    border-left: 3px solid #d63638;
+    color: #d63638;
+}
+
+/* 优化统计 */
+.waisg-stats {
+    font-size: 12px;
+    color: #646970;
+    padding-top: 8px;
+}
+
+/* 批量优化进度条 */
+.waisg-progress-bar-wrap {
+    background: #f0f0f1;
+    border-radius: 3px;
+    height: 22px;
+    margin: 10px 0;
+    overflow: hidden;
+}
+.waisg-progress-bar {
+    background: #0073aa;
+    height: 100%;
+    border-radius: 3px;
+    transition: width .3s ease;
+    color: #fff;
+    font-size: 12px;
+    line-height: 22px;
+    padding-left: 8px;
+    min-width: 40px;
+}
+
+/* 批量列表状态 */
+.waisg-batch-s-processing { color: #0073aa; font-weight: 600; }
+.waisg-batch-s-success    { color: #00a32a; font-weight: 600; }
+.waisg-batch-s-error      { color: #d63638; font-weight: 600; }
+.waisg-batch-s-warn       { color: #996b00; }
+
+/* 系统提示词文本框 */
+#waisg_system_prompt {
+    font-family: monospace;
+    font-size: 13px;
+}
+
+/* 响应式：窄屏适配 */
+@media (max-width: 782px) {
+    .waisg-single-btns {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+}
+
+/* =====================================================
+   SEO 评分面板
+   ===================================================== */
+.waisg-seo-score {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 12px;
+    color: #646970;
+}
+.waisg-score-label {
+    font-weight: 600;
+    color: #1d2327;
+}
+.waisg-score-total {
+    font-size: 15px;
+    font-weight: 700;
+}
+.waisg-score-items {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+.waisg-score-item {
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+}
+.waisg-score-green  { background: #d1fad7; color: #005a1c; }
+.waisg-score-yellow { background: #fff3cd; color: #7a5800; }
+.waisg-score-red    { background: #fde8e8; color: #8a0000; }
+.waisg-score-gray   { background: #f0f0f1; color: #999; }
+
+.waisg-score-green,
+.waisg-score-red,
+.waisg-score-yellow { cursor: pointer; }
+.waisg-score-green:hover,
+.waisg-score-red:hover,
+.waisg-score-yellow:hover { opacity: 0.75; text-decoration: underline; }
+
+/* =====================================================
+   内链建议
+   ===================================================== */
+.waisg-link-panel {
+    padding: 8px 12px;
+    background: #f8f9fa;
+    border: 1px solid #e0e0e0;
+    border-radius: 3px;
+    font-size: 12px;
+    line-height: 1.8;
+}
+.waisg-link-panel-title {
+    font-weight: 600;
+    margin-right: 6px;
+}
+.waisg-link-item {
+    display: inline-block;
+    margin-right: 12px;
+}
+.waisg-link-copy {
+    color: #0073aa !important;
+    cursor: pointer;
+    font-size: 11px !important;
+    text-decoration: underline;
+}
