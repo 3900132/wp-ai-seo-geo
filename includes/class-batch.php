@@ -39,9 +39,10 @@ class WAISG_Batch {
 			true
 		);
 		wp_localize_script( 'waisg-batch', 'waisgCfg', array(
-			'ajaxurl'  => admin_url( 'admin-ajax.php' ),
-			'nonce'    => wp_create_nonce( 'waisg_nonce' ),
-			'interval' => (int) WAISG_Settings::get( 'batch_interval', 3 ) * 1000,
+			'ajaxurl'     => admin_url( 'admin-ajax.php' ),
+			'nonce'       => wp_create_nonce( 'waisg_nonce' ),
+			'interval'    => (int) WAISG_Settings::get( 'batch_interval', 3 ) * 1000,
+			'concurrency' => (int) WAISG_Settings::get( 'batch_concurrency', 2 ),
 		) );
 	}
 
@@ -95,7 +96,7 @@ class WAISG_Batch {
 		$args = array(
 			'post_type'      => $post_type,
 			'post_status'    => $status,
-			'posts_per_page' => min( $limit, 200 ),
+			'posts_per_page' => min( $limit, 500 ),
 			'fields'         => 'ids',
 		);
 
@@ -142,17 +143,64 @@ class WAISG_Batch {
 			wp_send_json_error( array( 'message' => '无效文章 ID。', 'post_id' => $post_id ) );
 		}
 
-		$meta_box = new WAISG_Meta_Box();
-		$post     = get_post( $post_id );
+		$post = get_post( $post_id );
 
 		$vars = array(
 			'title'     => $post->post_title,
 			'content'   => $post->post_content,
 			'excerpt'   => $post->post_excerpt,
-			'seo_title' => get_post_meta( $post_id, $meta_box->get_seo_field_name( 'title' ), true ),
-			'seo_desc'  => get_post_meta( $post_id, $meta_box->get_seo_field_name( 'description' ), true ),
-			'seo_kw'    => get_post_meta( $post_id, $meta_box->get_seo_field_name( 'keywords' ), true ),
+			'seo_title' => get_post_meta( $post_id, WAISG_Meta_Box::get_seo_field_name( 'title' ), true ),
+			'seo_desc'  => get_post_meta( $post_id, WAISG_Meta_Box::get_seo_field_name( 'description' ), true ),
+			'seo_kw'    => get_post_meta( $post_id, WAISG_Meta_Box::get_seo_field_name( 'keywords' ), true ),
 		);
+
+		// ── SEO-only 预检：字段已全部达标则跳过 AI（纯 PHP，零 token）──
+		// 仅对「仅优化 SEO」生效：全量优化含正文重写，无法靠 PHP 判断是否需要优化。
+		// 对已优化好的站点做批量 SEO-only 时，可省下大量重复 AI 调用。
+		// 关键词为空时先用 PHP 从标题抽前 10 字补上（与 auto_fix_seo 一致），
+		// 避免关键词空直接判 false → 浪费一次 AI 调用做 PHP 本就能做的事。
+		if ( $seo_only ) {
+			if ( empty( $vars['seo_kw'] ) && ! empty( $vars['title'] ) ) {
+				$vars['seo_kw'] = mb_substr( $vars['title'], 0, 10, 'UTF-8' );
+			}
+			if ( WAISG_AI_API::seo_fields_pass( $vars ) ) {
+				$history_id = WAISG_History::save_staged( array(
+					'entry_type'   => 'optimized',
+					'post_id'      => $post_id,
+					'post_title'   => $vars['title'],
+					'post_content' => $post->post_content,
+					'post_excerpt' => $vars['excerpt'],
+					'seo_title'    => $vars['seo_title'],
+					'seo_desc'     => $vars['seo_desc'],
+					'seo_kw'       => $vars['seo_kw'],
+				) );
+
+				wp_send_json_success( array(
+					'post_id'    => $post_id,
+					'history_id' => $history_id,
+					'title'      => $vars['title'],
+					'message'    => 'SEO 字段已达标，已跳过 AI（零消耗）',
+					'seo_only'   => true,
+					'skipped'    => true,
+					'original'   => array(
+						'post_title'   => $post->post_title,
+						'post_content' => wp_strip_all_tags( $post->post_content ),
+						'post_excerpt' => $post->post_excerpt,
+						'seo_title'    => $vars['seo_title'],
+						'seo_desc'     => $vars['seo_desc'],
+						'seo_kw'       => $vars['seo_kw'],
+					),
+					'optimized'  => array(
+						'post_title'   => $vars['title'],
+						'post_content' => $post->post_content,
+						'post_excerpt' => $vars['excerpt'],
+						'seo_title'    => $vars['seo_title'],
+						'seo_desc'     => $vars['seo_desc'],
+						'seo_kw'       => $vars['seo_kw'],
+					),
+				) );
+			}
+		}
 
 		// 保护原文中的图片，防止 AI 优化时丢失（仅非 SEO-only 模式）
 		$img_protected = array( 'map' => array() );
@@ -165,23 +213,18 @@ class WAISG_Batch {
 			? WAISG_AI_API::build_optimize_seo_only_prompt( $vars, $template )
 			: WAISG_AI_API::build_optimize_all_prompt( $vars, $template );
 
-		// SEO-only 模式使用轻量模型（如已配置）；全量模式根据内容长度动态调整 max_tokens 和 timeout
-		$extra = array();
-		// 确定当前使用的模型偏好：前端传参 > 全局设置
+		// SEO-only 模式：SEO 字段较短，用用户配置的 max_tokens（不写死 1024，推理模型思考 token 也计入配额）
+		// 全量模式：根据内容长度动态调整 max_tokens 和 timeout
+		$extra = $seo_only
+			? array( 'max_tokens' => absint( WAISG_Settings::get( 'max_tokens', 4096 ) ) )
+			: WAISG_AI_API::build_long_content_extra( $vars['content'] );
+		// 确定当前使用的模型偏好：前端传参 > 全局设置。SEO-only 与全量统一走同一套模型选择逻辑，
+		// 旧版 SEO-only 分支无视 $use_model 只要配了轻量模型就强制走轻量，与 UI 承诺不符。
 		$use_model = $model_override ? $model_override : WAISG_Settings::get( 'batch_model', 'main' );
-		if ( $seo_only ) {
-			$extra['max_tokens'] = 1024;
+		if ( $use_model === 'lightweight' ) {
 			$lm = WAISG_Settings::get( 'lightweight_model', '' );
 			if ( $lm ) {
 				$extra['model'] = $lm;
-			}
-		} else {
-			$extra = WAISG_AI_API::build_long_content_extra( $vars['content'] );
-			if ( $use_model === 'lightweight' ) {
-				$lm = WAISG_Settings::get( 'lightweight_model', '' );
-				if ( $lm ) {
-					$extra['model'] = $lm;
-				}
 			}
 		}
 
@@ -190,21 +233,15 @@ class WAISG_Batch {
 		if ( is_wp_error( $result ) ) {
 			WAISG_Logger::log( $post_id, 'batch', $result->get_error_message(), $post->post_title );
 			wp_send_json_error( array(
-				'message' => $result->get_error_message(),
+				'message' => wp_strip_all_tags( $result->get_error_message() ),
 				'post_id' => $post_id,
 				'title'   => $post->post_title,
 			) );
 		}
 
-		$data = WAISG_AI_API::parse_json_response( $result['text'] );
+		$data = WAISG_AI_API::parse_json_response( $result['text'], 'batch', $post_id );
 		if ( ! $data ) {
-			// 记录原始返回内容到 PHP 错误日志，便于排查
-			error_log( sprintf(
-				'[WAISG] 文章 #%d AI 返回格式异常。原始返回（前 500 字符）：%s',
-				$post_id,
-				mb_substr( $result['text'], 0, 500, 'UTF-8' )
-			) );
-			WAISG_Logger::log( $post_id, 'batch', 'AI 返回格式异常（无法解析 JSON）', $post->post_title );
+			WAISG_Logger::log( $post_id, 'batch', 'AI 返回格式异常（无法解析 JSON）', $post->post_title . ' ｜AI返回：' . mb_substr( $result['text'], 0, 300, 'UTF-8' ) );
 			wp_send_json_error( array(
 				'message' => 'AI 返回格式异常，已跳过。',
 				'post_id' => $post_id,
@@ -227,7 +264,7 @@ class WAISG_Batch {
 		// 降低 AI 痕迹：先 humanize（如开启且未跳过），再外层兜底 filter（仅非 SEO-only 模式）
 		if ( ! $seo_only && ! empty( $new_content ) ) {
 			if ( ! $skip_humanize && WAISG_Settings::get( 'humanize_enabled', 0 ) ) {
-				$new_content = WAISG_AI_API::humanize( $new_content );
+				$new_content = WAISG_AI_API::humanize( $new_content, $use_model );
 			}
 			$new_content = WAISG_AI_API::filter_ai_phrases( $new_content );
 		}
@@ -286,6 +323,7 @@ class WAISG_Batch {
 				'seo_desc'     => $new_seo_d,
 				'seo_kw'       => $new_seo_kw,
 			),
+			'recovered'  => $data['_recovered'] ?? '',
 		) );
 	}
 }

@@ -23,18 +23,25 @@ $enabled_types = $opts['post_types'] ?? array( 'post', 'page' );
 						<input type="url" id="waisg_api_url" name="waisg_settings[api_url]"
 							value="<?php echo esc_attr( $opts['api_url'] ?? '' ); ?>"
 							class="regular-text" placeholder="https://api.openai.com/v1" />
-						<p class="description">兼容 OpenAI 格式的接口地址，例如 DeepSeek、文心等。</p>
+						<p class="description">
+							填<strong>完整端点地址</strong>，插件按地址自动识别协议、不会改动你填的地址：<br>
+							• <strong>OpenAI / 兼容</strong>（DeepSeek、智谱、通义、各类中转）：<code>.../v1/chat/completions</code><br>
+							• <strong>OpenAI Responses</strong>：<code>.../v1/responses</code><br>
+							• <strong>Anthropic Claude 原生</strong>：<code>https://api.anthropic.com/v1/messages</code><br>
+							• <strong>Google Gemini 原生</strong>：<code>https://generativelanguage.googleapis.com/v1beta</code>（模型名会自动拼入）<br>
+							仅填到 <code>.../v1</code> 这种半截地址时，才会兜底补 <code>/chat/completions</code>。
+						</p>
 					</td>
 				</tr>
 				<tr>
 					<th><label for="waisg_api_key">API Key</label></th>
 					<td>
 						<span style="position:relative;display:inline-block;">
-							<input type="password" id="waisg_api_key" name="waisg_settings[api_key]"
-								value="<?php echo esc_attr( $opts['api_key'] ?? '' ); ?>"
-								class="regular-text" autocomplete="new-password" style="padding-right:36px;" />
-							<button type="button" id="waisg-toggle-api-key" title="显示 / 隐藏 API Key"
-								style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;font-size:16px;line-height:1;padding:2px;">👁</button>
+						 <input type="password" id="waisg_api_key" name="waisg_settings[api_key]"
+						  value="<?php echo esc_attr( $opts['api_key'] ?? '' ); ?>"
+						  class="regular-text" autocomplete="new-password" style="padding-right:36px;" />
+						 <button type="button" class="waisg-toggle-key" data-target="waisg_api_key" title="显示 / 隐藏 API Key"
+						  style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;font-size:16px;line-height:1;padding:2px;">👁</button>
 						</span>
 					</td>
 				</tr>
@@ -79,6 +86,15 @@ $enabled_types = $opts['post_types'] ?? array( 'post', 'page' );
 						<input type="number" id="waisg_max_tokens" name="waisg_settings[max_tokens]"
 							value="<?php echo absint( $opts['max_tokens'] ?? 4096 ); ?>"
 							min="512" max="32000" class="small-text" />
+					</td>
+				</tr>
+				<tr>
+					<th><label for="waisg_image_keyword_max_tokens">配图搜词 Tokens</label></th>
+					<td>
+						<input type="number" id="waisg_image_keyword_max_tokens" name="waisg_settings[image_keyword_max_tokens]"
+							value="<?php echo absint( $opts['image_keyword_max_tokens'] ?? 200 ); ?>"
+							min="100" max="32000" class="small-text" />
+						<p class="description">配图时把节级中文标题/关键词翻译成英文搜图词的 max_tokens 预算。<strong>推理模型（如 deepseek-v4-flash / o1 / R1）思考会吃配额，建议设 800 以上</strong>，否则返空触发重试更慢；普通模型 200 即可。</p>
 					</td>
 				</tr>
 				<tr>
@@ -218,7 +234,23 @@ $enabled_types = $opts['post_types'] ?? array( 'post', 'page' );
 							name="waisg_settings[batch_interval]"
 							value="<?php echo absint( $opts['batch_interval'] ?? 3 ); ?>"
 							min="1" max="30" class="small-text" /> 秒
-						<p class="description">批量优化时每篇文章之间的等待时间，防止服务器卡死。</p>
+						<p class="description">批量优化时<strong>每"批"完成后</strong>的等待时间，防止 API 限速。单线程时即每篇之间的间隔；并发时即每 N 篇完成后的间隔。</p>
+					</td>
+				</tr>
+				<tr>
+					<th><label for="waisg_batch_concurrency">批量并发数</label></th>
+					<td>
+						<input type="number" id="waisg_batch_concurrency"
+							name="waisg_settings[batch_concurrency]"
+							value="<?php echo absint( $opts['batch_concurrency'] ?? 2 ); ?>"
+							min="1" max="5" class="small-text" /> 篇
+						<p class="description">
+							批量优化 / 批量生成 / 批量改写时<strong>同时</strong>处理的文章数，1-5 篇可选。<br>
+							• <strong>1</strong>：串行，最稳但最慢（旧版行为）<br>
+							• <strong>2-3</strong>：推荐，速度提升约 2-3 倍，API 限速友好<br>
+							• <strong>4-5</strong>：最快，但容易触发 API 429 限速，建议主模型 API 额度高时再用<br>
+							⚠️ 浏览器对同域名最多 6 路并发，超过 5 可能反而变慢；同时受 AI 平台 RPM/TPM 上限制约。
+						</p>
 					</td>
 				</tr>
 				<tr>
@@ -236,6 +268,21 @@ $enabled_types = $opts['post_types'] ?? array( 'post', 'page' );
 					</td>
 				</tr>
 				<tr>
+					<th>清理无用标签</th>
+					<td>
+						<label>
+							<input type="checkbox" name="waisg_settings[strip_wrapper_tags]" value="1"
+								<?php checked( $opts['strip_wrapper_tags'] ?? 1, 1 ); ?> />
+							自动清除 AI 返回正文中的 div/p/span 等无语义包装标签（推荐开启）
+						</label>
+						<p class="description">
+							开启后，AI 生成与优化的正文会自动剥除 div/p/span/font/section 等包装标签：闭合标签转为空行保留段落结构，
+							WordPress 前台会依据空行自动重建段落，显示效果不变；h2/h3、列表、表格、图片、链接等语义标签原样保留。
+							可避免块编辑器全篇落入「经典块」后残留无效布局标签导致前台样式失控。关闭则保留 AI 返回的原始 HTML 结构。
+						</p>
+					</td>
+				</tr>
+				<tr>
 					<th>降低 AI 痕迹</th>
 					<td>
 						<label>
@@ -245,7 +292,24 @@ $enabled_types = $opts['post_types'] ?? array( 'post', 'page' );
 						</label>
 						<p class="description">
 							开启后，所有生成和优化的正文内容会经过二次润色处理，打散 AI 写作痕迹。
-							会额外消耗一次 API 调用（使用轻量模型），但能显著降低被 AI 检测工具识别的概率。
+							会额外消耗一次 API 调用，但能显著降低被 AI 检测工具识别的概率。
+						</p>
+					</td>
+				</tr>
+				<tr>
+					<th><label for="waisg_humanize_model">润色模型</label></th>
+					<td>
+						<?php $hm = $opts['humanize_model'] ?? 'lightweight'; ?>
+						<select id="waisg_humanize_model" name="waisg_settings[humanize_model]">
+							<option value="lightweight" <?php selected( $hm, 'lightweight' ); ?>>轻量模型（最快，成本最低）</option>
+							<option value="main" <?php selected( $hm, 'main' ); ?>>主模型（质量最高，最慢）</option>
+							<option value="follow" <?php selected( $hm, 'follow' ); ?>>跟随主任务模型（用什么生成就用什么润色）</option>
+						</select>
+						<p class="description">
+							控制「降低 AI 痕迹」这一步使用哪个模型。<br>
+							• <strong>轻量模型</strong>：默认值，最省 token，单篇润色 30-40s（需在基本设置配置轻量模型）<br>
+							• <strong>主模型</strong>：润色质量最高，但单篇耗时翻倍<br>
+							• <strong>跟随主任务模型</strong>：当前任务用什么模型生成正文，就用同一个模型润色（最灵活）
 						</p>
 					</td>
 				</tr>
@@ -317,17 +381,32 @@ $enabled_types = $opts['post_types'] ?? array( 'post', 'page' );
 						</p>
 					</td>
 				</tr>
-				<!-- Pexels / Unsplash API Key -->
-				<tr id="waisg-img-row-apikey">
-					<th><label for="waisg_image_api_key" id="waisg-img-apikey-label">图片 API Key</label></th>
+				<!-- Pexels API Key（独立字段） -->
+				<tr id="waisg-img-row-apikey-pexels">
+					<th><label for="waisg_image_api_key_pexels">Pexels API Key</label></th>
 					<td>
-						<input type="password" id="waisg_image_api_key" name="waisg_settings[image_api_key]"
-							value="<?php echo esc_attr( $opts['image_api_key'] ?? '' ); ?>"
-							class="regular-text" autocomplete="new-password" />
-						<p class="description" id="waisg-img-apikey-desc">
-							<span id="waisg-img-apikey-hint-pexels">Pexels：填写 API Key（在 <a href="https://www.pexels.com/api/" target="_blank">pexels.com/api</a> 申请）。</span>
-							<span id="waisg-img-apikey-hint-unsplash" style="display:none;">Unsplash：填写 <strong>Access Key</strong>（不是 Application ID，也不是 Secret Key）。在 <a href="https://unsplash.com/developers" target="_blank">unsplash.com/developers</a> → Your Application → Keys 中查看。</span>
-						</p>
+						<span style="position:relative;display:inline-block;">
+							<input type="password" id="waisg_image_api_key_pexels" name="waisg_settings[image_api_key_pexels]"
+								value="<?php echo esc_attr( $opts['image_api_key_pexels'] ?? '' ); ?>"
+								class="regular-text" autocomplete="new-password" style="padding-right:36px;" />
+							<button type="button" class="waisg-toggle-key" data-target="waisg_image_api_key_pexels" title="显示 / 隐藏 API Key"
+								style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;font-size:16px;line-height:1;padding:2px;">👁</button>
+						</span>
+						<p class="description">Pexels：填写 API Key（在 <a href="https://www.pexels.com/api/" target="_blank">pexels.com/api</a> 申请）。</p>
+					</td>
+				</tr>
+				<!-- Unsplash API Key（独立字段） -->
+				<tr id="waisg-img-row-apikey-unsplash" style="display:none;">
+					<th><label for="waisg_image_api_key_unsplash">Unsplash Access Key</label></th>
+					<td>
+						<span style="position:relative;display:inline-block;">
+							<input type="password" id="waisg_image_api_key_unsplash" name="waisg_settings[image_api_key_unsplash]"
+								value="<?php echo esc_attr( $opts['image_api_key_unsplash'] ?? '' ); ?>"
+								class="regular-text" autocomplete="new-password" style="padding-right:36px;" />
+							<button type="button" class="waisg-toggle-key" data-target="waisg_image_api_key_unsplash" title="显示 / 隐藏 API Key"
+								style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;font-size:16px;line-height:1;padding:2px;">👁</button>
+						</span>
+						<p class="description">Unsplash：填写 <strong>Access Key</strong>（不是 Application ID，也不是 Secret Key）。在 <a href="https://unsplash.com/developers" target="_blank">unsplash.com/developers</a> → Your Application → Keys 中查看。</p>
 					</td>
 				</tr>
 				<!-- AI 图片生成字段 -->
@@ -337,15 +416,23 @@ $enabled_types = $opts['post_types'] ?? array( 'post', 'page' );
 						<input type="text" id="waisg_image_ai_url" name="waisg_settings[image_ai_url]"
 							value="<?php echo esc_attr( $opts['image_ai_url'] ?? '' ); ?>"
 							class="regular-text" placeholder="https://api.openai.com/v1/images/generations" />
-						<p class="description">兼容 OpenAI 格式的图片生成接口地址（/v1/images/generations）。</p>
+						<p class="description">兼容 OpenAI 格式的图片生成接口地址（<code>/v1/images/generations</code>）。<strong>多协议自动适配</strong>（v1.9.9）：按地址自动识别——<br>
+						• <strong>OpenAI 兼容</strong>（默认）：含 OpenAI dall-e-3 / 阿里通义万相 / 智谱 / 国产中转等，填 <code>.../v1/images/generations</code>，Bearer 鉴权<br>
+						• <strong>Google Gemini Imagen</strong>：填 <code>.../models/imagen-3.0:predict</code>（含 <code>googleapis</code>），URL Query key 鉴权<br>
+						• <strong>Stable Diffusion WebUI</strong>（AUTOMATIC1111）：填 <code>.../sdapi/v1/txt2img</code>，可选 Basic Auth（Key 填 <code>user:pass</code>，无鉴权留空）<br>
+						填错地址也能测出——测试搜图会透传真实错误。</p>
 					</td>
 				</tr>
 				<tr id="waisg-img-row-ai-key">
 					<th><label for="waisg_image_ai_key">图片生成 API Key</label></th>
 					<td>
-						<input type="password" id="waisg_image_ai_key" name="waisg_settings[image_ai_key]"
-							value="<?php echo esc_attr( $opts['image_ai_key'] ?? '' ); ?>"
-							class="regular-text" autocomplete="new-password" />
+						<span style="position:relative;display:inline-block;">
+							<input type="password" id="waisg_image_ai_key" name="waisg_settings[image_ai_key]"
+								value="<?php echo esc_attr( $opts['image_ai_key'] ?? '' ); ?>"
+								class="regular-text" autocomplete="new-password" style="padding-right:36px;" />
+							<button type="button" class="waisg-toggle-key" data-target="waisg_image_ai_key" title="显示 / 隐藏 API Key"
+								style="position:absolute;right:4px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;font-size:16px;line-height:1;padding:2px;">👁</button>
+						</span>
 					</td>
 				</tr>
 				<tr id="waisg-img-row-ai-model">
@@ -360,11 +447,10 @@ $enabled_types = $opts['post_types'] ?? array( 'post', 'page' );
 				<tr id="waisg-img-row-ai-size">
 					<th><label for="waisg_image_ai_size">图片尺寸</label></th>
 					<td>
-						<select id="waisg_image_ai_size" name="waisg_settings[image_ai_size]">
-							<option value="1024x1024" <?php selected( $opts['image_ai_size'] ?? '1024x1024', '1024x1024' ); ?>>1024×1024（正方形）</option>
-							<option value="1792x1024" <?php selected( $opts['image_ai_size'] ?? '1024x1024', '1792x1024' ); ?>>1792×1024（横向）</option>
-							<option value="1024x1792" <?php selected( $opts['image_ai_size'] ?? '1024x1024', '1024x1792' ); ?>>1024×1792（纵向）</option>
-						</select>
+						<input type="text" id="waisg_image_ai_size" name="waisg_settings[image_ai_size]"
+							value="<?php echo esc_attr( $opts['image_ai_size'] ?? '1024x1024' ); ?>"
+							class="regular-text" placeholder="1024x1024" />
+						<p class="description">按图片生成平台实际支持的尺寸填写，如 OpenAI dall-e-3 用 <code>1024x1024</code> / <code>1792x1024</code> / <code>1024x1792</code>；其他平台请按其文档填写（如 <code>2048x2048</code> 等）。格式：<code>宽x高</code>。</p>
 					</td>
 				</tr>
 				<tr>
@@ -385,9 +471,39 @@ $enabled_types = $opts['post_types'] ?? array( 'post', 'page' );
 					</td>
 				</tr>
 			</table>
-		</div>
 
-		<!-- 定时自动优化 -->
+			<!-- 配图题材风格表（v1.9.9 新增）——面板可编辑，留空用内置默认 14 套+default 兜底 -->
+			<h3 style="margin-top:20px;">配图题材风格表</h3>
+			<p class="description">按文章总关键词自动识别题材分派视觉风格指令，提升 AI 生成图与文章主题的贴合度。<strong>留空 = 使用内置默认 14 套题材 + default 兜底</strong>，无需改代码即可在面板增删题材、改特征词、改风格指令。</p>
+			<table class="form-table">
+				<tr>
+					<th><label for="waisg_image_style_table">题材表</label></th>
+					<td>
+						<textarea id="waisg_image_style_table" name="waisg_settings[image_style_table]" rows="20" class="large-text code" placeholder="<?php echo esc_attr( WAISG_Settings::get_default_image_style_table_text() ); ?>"><?php echo esc_textarea( $opts['image_style_table'] ?? '' ); ?></textarea>
+						<p class="description">每条题材用4行表示，格式（缩进必须2个普通空格，不是Tab不是1空格）：<br>
+						<pre style="background:#f6f7f7;padding:8px;border:1px solid #dcdcde;border-radius:3px;font-size:12px;font-family:monospace;white-space:pre;margin:4px 0;">题材名:
+  zh: 中文风格指令
+  en: 英文风格指令
+  words: 特征词逗号分隔</pre>
+						<strong>⚠️ 缩进必须用2个普通空格</strong>（不是 Tab，不是1空格或4空格）——zh/en/words 三行行首必须正好2个普通空格字符，否则解析不出该字段。<strong>视觉上看可能像1个空格，但实际是2个普通空格字符</strong>，编辑时请务必敲2次空格键。<br>
+						<br>
+						• <strong>题材名</strong>：英文标识（如 gaming/tech/food），用于内部透传，结尾加冒号，<strong>无缩进</strong><br>
+						• <strong>zh</strong>：中文文章输出时拼进 prompt 的视觉风格指令<br>
+						• <strong>en</strong>：英文/其他语言文章输出时拼进 prompt 的视觉风格指令<br>
+						• <strong>words</strong>：题材识别用，<strong>中英双版都放</strong>（如 <code>游戏,电竞,吃鸡,game,gaming,pubg</code>），按文章总关键词命中即分派该题材；default 兜底行 words 留空（带 <code># 兜底不参与识别</code> 注释）<br>
+						• <strong>default 行</strong>：通用兜底（没命中任何题材时用），<strong>请勿删除</strong>，删了保存时会自动补回内置默认<br>
+						• <code>#</code> 开头为注释行，空行忽略（题材间可留空行分隔更清楚）<br>
+						• 题材表里题材的<strong>排列顺序就是命中优先级</strong>（排在前面的先匹配）<br>
+						• 留空整框 = 使用内置默认题材表（14 套 + default 兜底）</p>
+						<details class="waisg-default-toggle" style="margin-top:8px;">
+							<summary style="cursor:pointer;color:#2271b1;font-size:13px;">📋 查看/恢复内置默认题材表</summary>
+							<pre class="waisg-default-preview" style="margin-top:6px;padding:10px;background:#f6f7f7;border:1px solid #dcdcde;border-radius:3px;font-size:12px;font-family:monospace;white-space:pre-wrap;max-height:300px;overflow:auto;"><?php echo esc_html( WAISG_Settings::get_default_image_style_table_text() ); ?></pre>
+							<button type="button" class="button button-small" style="margin-top:6px;" onclick="document.getElementById('waisg_image_style_table').value=this.previousElementSibling.textContent.trim();">恢复为默认题材表</button>
+						</details>
+					</td>
+				</tr>
+			</table>
+		</div>
 		<div class="waisg-card">
 			<h2>七、定时自动优化</h2>
 			<p class="description">定期自动对旧文章执行 AI 优化，优化结果存入「优化历史→待处理」，由你手动审阅后决定是否应用。</p>
@@ -479,24 +595,20 @@ $enabled_types = $opts['post_types'] ?? array( 'post', 'page' );
 		</div>
 		<script>
 		function waisgToggleImageFields(val) {
-			var isStock = (val === 'pexels' || val === 'unsplash');
-			var isAi    = (val === 'ai_image');
-			var hasImg  = isStock || isAi;
-			document.getElementById('waisg-img-row-apikey').style.display   = isStock ? '' : 'none';
-			document.getElementById('waisg-img-row-ai-url').style.display   = isAi ? '' : 'none';
-			document.getElementById('waisg-img-row-ai-key').style.display   = isAi ? '' : 'none';
-			document.getElementById('waisg-img-row-ai-model').style.display = isAi ? '' : 'none';
-			document.getElementById('waisg-img-row-ai-size').style.display  = isAi ? '' : 'none';
-			document.getElementById('waisg-img-row-test').style.display     = hasImg ? '' : 'none';
-			// 切换 Unsplash / Pexels 提示文字
-			if (isStock) {
-				var isUnsplash = (val === 'unsplash');
-				document.getElementById('waisg-img-apikey-hint-pexels').style.display    = isUnsplash ? 'none' : '';
-				document.getElementById('waisg-img-apikey-hint-unsplash').style.display  = isUnsplash ? '' : 'none';
-			}
+		 var isStock   = (val === 'pexels' || val === 'unsplash');
+		 var isAi      = (val === 'ai_image');
+		 var hasImg    = isStock || isAi;
+		 // Pexels / Unsplash 各自独立的 Key 行——按选中的来源切显示对应那行
+		 document.getElementById('waisg-img-row-apikey-pexels').style.display   = (val === 'pexels')   ? '' : 'none';
+		 document.getElementById('waisg-img-row-apikey-unsplash').style.display = (val === 'unsplash') ? '' : 'none';
+		 document.getElementById('waisg-img-row-ai-url').style.display   = isAi ? '' : 'none';
+		 document.getElementById('waisg-img-row-ai-key').style.display   = isAi ? '' : 'none';
+		 document.getElementById('waisg-img-row-ai-model').style.display = isAi ? '' : 'none';
+		 document.getElementById('waisg-img-row-ai-size').style.display  = isAi ? '' : 'none';
+		 document.getElementById('waisg-img-row-test').style.display     = hasImg ? '' : 'none';
 		}
 		document.addEventListener('DOMContentLoaded', function(){
-			waisgToggleImageFields(document.getElementById('waisg_image_source').value);
+		 waisgToggleImageFields(document.getElementById('waisg_image_source').value);
 		});
 		</script>
 

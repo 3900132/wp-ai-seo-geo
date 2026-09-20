@@ -5,10 +5,21 @@
 if ( ! defined( 'ABSPATH' ) ) exit;
 
 $image_source = WAISG_Settings::get( 'image_source', 'none' );
+// 按 image_source 取对应独立字段判断是否已配置 Key（v1.9.7 拆字段后不再用共用 image_api_key）
+$stock_key = '';
+if ( $image_source === 'pexels' ) {
+	$stock_key = WAISG_Settings::get( 'image_api_key_pexels', '' );
+} elseif ( $image_source === 'unsplash' ) {
+	$stock_key = WAISG_Settings::get( 'image_api_key_unsplash', '' );
+}
+// 兼容旧用户：新字段为空时回退旧共用字段（迁移前数据）
+if ( $stock_key === '' ) {
+	$stock_key = WAISG_Settings::get( 'image_api_key', '' );
+}
 $has_image    = $image_source !== 'none' && (
 	$image_source === 'ai_image'
 		? ( ! empty( WAISG_Settings::get( 'image_ai_url', '' ) ) && ! empty( WAISG_Settings::get( 'image_ai_key', '' ) ) )
-		: ! empty( WAISG_Settings::get( 'image_api_key', '' ) )
+		: ! empty( $stock_key )
 );
 
 $post_types = WAISG_Settings::get_post_types();
@@ -37,6 +48,25 @@ ob_start();
 			<?php else : ?>
 			<p class="description">选择轻量模型可大幅降低 API 费用，适合批量生成。默认值跟随「设置 → 批量优化设置 → 批量任务模型」。</p>
 			<?php endif; ?>
+		</td>
+	</tr>
+	<tr>
+		<th>批量润色</th>
+		<td>
+			<?php $gen_humanize_on = (int) WAISG_Settings::get( 'humanize_enabled', 0 ); ?>
+			<label style="<?php echo $gen_humanize_on ? '' : 'color:#999;'; ?>">
+				<input type="checkbox" class="gen-skip-humanize-input" value="1"
+					<?php disabled( $gen_humanize_on, 0 ); ?> />
+				跳过二次润色（大幅加速，每篇少 1-3 次 API 调用）
+			</label>
+			<p class="description">
+				<?php if ( $gen_humanize_on ) : ?>
+					⚠️ 当前已全局开启「降低 AI 痕迹」，每篇需额外 1-3 次 API 调用进行润色，<strong>是最大的耗时来源</strong>。
+					勾选此项可在批量生成场景下跳过润色，生成后可在「待处理」中逐篇手动润色。
+				<?php else : ?>
+					当前未开启「降低 AI 痕迹」，无需勾选（已自动禁用）。
+				<?php endif; ?>
+			</p>
 		</td>
 	</tr>
 	<tr>
@@ -356,6 +386,24 @@ $common_settings_html = ob_get_clean();
 						<option value="lightweight" <?php selected( $gen_batch_model_default, 'lightweight' ); ?>>轻量模型（<?php echo esc_html( $gen_lm_name ); ?>）</option>
 						<?php endif; ?>
 					</select>
+				</td>
+			</tr>
+			<tr>
+				<th>批量润色</th>
+				<td>
+					<?php $rw_humanize_on = (int) WAISG_Settings::get( 'humanize_enabled', 0 ); ?>
+					<label style="<?php echo $rw_humanize_on ? '' : 'color:#999;'; ?>">
+						<input type="checkbox" class="gen-skip-humanize-input" value="1"
+							<?php disabled( $rw_humanize_on, 0 ); ?> />
+						跳过二次润色（大幅加速，每篇少 1-3 次 API 调用）
+					</label>
+					<p class="description">
+						<?php if ( $rw_humanize_on ) : ?>
+							⚠️ 当前已全局开启「降低 AI 痕迹」，每篇需额外 1-3 次 API 调用进行润色，<strong>是最大的耗时来源</strong>。
+						<?php else : ?>
+							当前未开启「降低 AI 痕迹」，无需勾选（已自动禁用）。
+						<?php endif; ?>
+					</p>
 				</td>
 			</tr>
 		</table>

@@ -12,10 +12,10 @@
     var ajaxurl = cfg.ajaxurl || '';
 
     // =========================================================
-    // API Key 显示 / 隐藏切换
+    // API Key 显示 / 隐藏切换（大模型 / 图片 / 图片生成 三个密钥字段共用）
     // =========================================================
-    $('#waisg-toggle-api-key').on('click', function () {
-        var $inp = $('#waisg_api_key');
+    $('.waisg-toggle-key').on('click', function () {
+        var $inp = $('#' + $(this).data('target'));
         var isHidden = $inp.attr('type') === 'password';
         $inp.attr('type', isHidden ? 'text' : 'password');
         $(this).text(isHidden ? '🙈' : '👁');
@@ -83,16 +83,42 @@
         var $res = $('#waisg-test-image-result');
         $res.html('').show();
 
+        // 与大模型测试一致：带上表单即时填的值，未保存也能测——
+        // 这样用户能在保存前确认 Key/URL/模型是否有效，避免"必须先保存才能测"的假象。
+        // Pexels / Unsplash 拆成各自独立的 Key 字段——按当前选中的来源取对应那个框的值发送。
+        var imgSrc = $('#waisg_image_source').val();
+        var imgKey = '';
+        if (imgSrc === 'pexels') {
+            imgKey = $('#waisg_image_api_key_pexels').val();
+        } else if (imgSrc === 'unsplash') {
+            imgKey = $('#waisg_image_api_key_unsplash').val();
+        }
+
         $.post(ajaxurl, {
-            action: 'waisg_test_image_api',
-            nonce:  nonce,
+            action:          'waisg_test_image_api',
+            nonce:           nonce,
+            image_source:    imgSrc,
+            image_api_key:   imgKey,
+            image_ai_url:    $('#waisg_image_ai_url').val(),
+            image_ai_key:    $('#waisg_image_ai_key').val(),
+            image_ai_model:  $('#waisg_image_ai_model').val(),
+            image_ai_size:   $('#waisg_image_ai_size').val(),
         }, function (res) {
             $btn.prop('disabled', false).text('测试搜图');
+            // 防御性转义：图片 URL 和消息来自第三方 API，不可信
+            function escHtml(s) { return $('<div/>').text(s == null ? '' : String(s)).html(); }
+            function safeUrl(u) {
+                u = String(u == null ? '' : u).replace(/"/g, '&quot;');
+                // 仅允许 http/https 协议，防止 javascript: 等协议注入
+                return /^https?:\/\//i.test(u) ? u : '';
+            }
             if (res.success && res.data.url) {
-                $res.html('<span style="color:#00a32a;">' + (res.data.message || '✅ 成功') + '</span>'
-                    + '<br><img src="' + res.data.url + '" style="max-height:80px;margin-top:6px;border-radius:4px;" />');
+                var url = safeUrl(res.data.url);
+                var msg = escHtml(res.data.message || '✅ 成功');
+                var imgTag = url ? '<br><img src="' + url + '" style="max-height:80px;margin-top:6px;border-radius:4px;" />' : '';
+                $res.html('<span style="color:#00a32a;">' + msg + '</span>' + imgTag);
             } else {
-                var msg = (res.data && res.data.message) ? res.data.message : '❌ 未获取到图片';
+                var msg = escHtml((res.data && res.data.message) ? res.data.message : '❌ 未获取到图片');
                 $res.html('<span style="color:#c00;">' + msg + '</span>');
             }
         }).fail(function () {
@@ -146,19 +172,19 @@
         }
         $.each(templates, function (i, tpl) {
             var preview = (tpl.structure || '').substring(0, 120) + ((tpl.structure || '').length > 120 ? '...' : '');
-            var esc = function (s) { return $('<div>').text(s).html(); };
+            var esc = function (s) { return $('<div>').text(s).html().replace(/"/g, '&quot;'); };
             $tbody.append(
-                '<tr data-id="' + tpl.id + '">'
+                '<tr data-id="' + esc(tpl.id) + '">'
                 + '<td><strong>' + esc(tpl.name) + '</strong></td>'
                 + '<td><code style="white-space:pre-wrap;font-size:11px;word-break:break-all;">' + esc(preview) + '</code></td>'
                 + '<td>'
                 + '<button type="button" class="button button-small waisg-tpl-edit"'
-                + ' data-id="' + tpl.id + '"'
+                + ' data-id="' + esc(tpl.id) + '"'
                 + ' data-name="' + esc(tpl.name) + '"'
                 + ' data-structure="' + esc(tpl.structure || '') + '"'
                 + ' data-extra="' + esc(tpl.extra || '') + '">编辑</button>'
                 + '<button type="button" class="button button-small waisg-tpl-delete"'
-                + ' data-id="' + tpl.id + '" style="color:#c00;margin-left:4px;">删除</button>'
+                + ' data-id="' + esc(tpl.id) + '" style="color:#c00;margin-left:4px;">删除</button>'
                 + '</td></tr>'
             );
         });

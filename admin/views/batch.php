@@ -36,6 +36,7 @@ $preset_ids = sanitize_text_field( $_GET['post_ids'] ?? '' );
 					<select id="waisg-batch-status">
 						<option value="publish">已发布</option>
 						<option value="draft">草稿</option>
+						<option value="pending">待审</option>
 						<option value="any">全部</option>
 					</select>
 				</td>
@@ -46,8 +47,8 @@ $preset_ids = sanitize_text_field( $_GET['post_ids'] ?? '' );
 					<select id="waisg-batch-cat">
 						<option value="0">全部分类</option>
 						<?php foreach ( $categories as $cat ) : ?>
-							<option value="<?php echo $cat->term_id; ?>">
-								<?php echo esc_html( $cat->name ); ?> (<?php echo $cat->count; ?>)
+							<option value="<?php echo esc_attr( $cat->term_id ); ?>">
+								<?php echo esc_html( $cat->name ); ?> (<?php echo esc_html( $cat->count ); ?>)
 							</option>
 						<?php endforeach; ?>
 					</select>
@@ -56,8 +57,8 @@ $preset_ids = sanitize_text_field( $_GET['post_ids'] ?? '' );
 			<tr>
 				<th>每次最多获取</th>
 				<td>
-					<input type="number" id="waisg-batch-limit" value="50" min="1" max="500" class="small-text" /> 篇
-					<span class="description" style="margin-left:6px;">从数据库获取的上限，建议不超过 200</span>
+					<input type="number" id="waisg-batch-limit" value="100" min="1" max="500" class="small-text" /> 篇
+					<span class="description" style="margin-left:6px;">从数据库获取的上限，建议不超过 200，最高 500</span>
 				</td>
 			</tr>
 			<tr>
@@ -68,6 +69,7 @@ $preset_ids = sanitize_text_field( $_GET['post_ids'] ?? '' );
 						<option value="20" selected>20 篇/页</option>
 						<option value="50">50 篇/页</option>
 						<option value="100">100 篇/页</option>
+						<option value="200">200 篇/页</option>
 					</select>
 					<span class="description" style="margin-left:6px;">每页只渲染对应数量的行，减少页面卡顿</span>
 				</td>
@@ -126,16 +128,18 @@ $preset_ids = sanitize_text_field( $_GET['post_ids'] ?? '' );
 			<tr>
 				<th>批量润色</th>
 				<td>
-					<label>
-						<input type="checkbox" id="waisg-batch-skip-humanize" value="1" />
+					<?php $bt_humanize_on = (int) WAISG_Settings::get( 'humanize_enabled', 0 ); ?>
+					<label style="<?php echo $bt_humanize_on ? '' : 'color:#999;'; ?>">
+						<input type="checkbox" id="waisg-batch-skip-humanize" value="1"
+							<?php disabled( $bt_humanize_on, 0 ); ?> />
 						跳过二次润色（大幅加速，每篇少 1-3 次 API 调用）
 					</label>
 					<p class="description">
-						<?php if ( WAISG_Settings::get( 'humanize_enabled', 0 ) ) : ?>
+						<?php if ( $bt_humanize_on ) : ?>
 							⚠️ 当前已全局开启「降低 AI 痕迹」，批量优化时每篇需额外 1-3 次 API 调用进行润色，<strong>是最大的耗时来源</strong>。
 							勾选此项可在批量场景下跳过润色，优化后在「待处理」中逐篇手动润色。
 						<?php else : ?>
-							当前未开启「降低 AI 痕迹」，无需勾选。
+							当前未开启「降低 AI 痕迹」，无需勾选（已自动禁用）。
 						<?php endif; ?>
 					</p>
 				</td>
@@ -205,6 +209,7 @@ $preset_ids = sanitize_text_field( $_GET['post_ids'] ?? '' );
 			<strong style="font-size:13px;">批量应用到 WordPress（已勾选）：</strong>
 			<select id="waisg-batch-action-status">
 				<option value="draft">存为草稿</option>
+				<option value="pending">保持待审</option>
 				<option value="publish">立即发布</option>
 				<option value="future">定时发布</option>
 			</select>

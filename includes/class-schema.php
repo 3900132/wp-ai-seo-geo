@@ -352,8 +352,7 @@ class WAISG_Schema {
 		}
 
 		// ── Description（优先 SEO 描述，后备摘要）─────────
-		$meta_box = new WAISG_Meta_Box();
-		$desc     = get_post_meta( $post->ID, $meta_box->get_seo_field_name( 'description' ), true );
+		$desc = get_post_meta( $post->ID, WAISG_Meta_Box::get_seo_field_name( 'description' ), true );
 		if ( empty( $desc ) ) {
 			$desc = $post->post_excerpt;
 		}

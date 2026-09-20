@@ -22,6 +22,12 @@ class WAISG_Logger {
 		'rewrite'           => '改写 / 伪原创',
 		'batch'             => '批量优化',
 		'cron'              => '定时自动优化',
+		'test_api'          => 'API 连接测试',
+		'test_lightweight'  => '轻量模型测试',
+		'test_image'        => '图片 API 测试',
+		'fetch_images'      => '配图获取',
+		'retry_reasoning'   => '推理重试',
+		'empty_response'    => 'AI 返回空内容',
 	);
 
 	public function __construct() {
@@ -58,7 +64,7 @@ class WAISG_Logger {
 			'post_id' => absint( $post_id ),
 			'context' => sanitize_key( $context ),
 			'message' => mb_substr( sanitize_text_field( $message ), 0, 500, 'UTF-8' ),
-			'extra'   => mb_substr( sanitize_text_field( $extra ), 0, 200, 'UTF-8' ),
+			'extra'   => mb_substr( sanitize_text_field( $extra ), 0, 600, 'UTF-8' ),
 		) );
 
 		$logs = self::apply_retention( $logs );
@@ -181,9 +187,14 @@ class WAISG_Logger {
 		wp_send_json_success( array( 'csv' => $csv ) );
 	}
 
-	/** CSV 单元格转义 */
+	/** CSV 单元格转义（含公式注入防护） */
 	private static function csv_cell( $value ) {
-		$value = str_replace( '"', '""', (string) $value );
+		$value = (string) $value;
+		// 防止 Excel/表格软件把 = + - @ 开头的内容当作公式执行
+		if ( $value !== '' && in_array( $value[0], array( '=', '+', '-', '@' ), true ) ) {
+			$value = "'" . $value;
+		}
+		$value = str_replace( '"', '""', $value );
 		return '"' . $value . '"';
 	}
 }

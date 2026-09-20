@@ -69,6 +69,7 @@ class WAISG_Generator {
 		$total       = absint( $_POST['total'] ?? 1 );
 		$template_id = absint( $_POST['template_id'] ?? 0 );
 		$model_override = sanitize_key( $_POST['model_override'] ?? '' );
+		$skip_humanize  = ! empty( $_POST['skip_humanize'] );
 		$template    = null;
 		if ( $template_id ) {
 			foreach ( WAISG_Settings::get_templates() as $tpl ) {
@@ -110,19 +111,14 @@ class WAISG_Generator {
 		if ( is_wp_error( $result ) ) {
 			WAISG_Logger::log( 0, 'generate', $result->get_error_message(), '第 ' . $index . ' 篇' );
 			wp_send_json_error( array(
-				'message' => '第 ' . $index . ' 篇 AI 请求失败：' . $result->get_error_message(),
+				'message' => '第 ' . $index . ' 篇 AI 请求失败：' . wp_strip_all_tags( $result->get_error_message() ),
 				'index'   => $index,
 			) );
 		}
 
-		$data = WAISG_AI_API::parse_json_response( $result['text'] );
+		$data = WAISG_AI_API::parse_json_response( $result['text'], 'generate', 0 );
 		if ( ! $data ) {
-			error_log( sprintf(
-				'[WAISG] 生成第 %d 篇文章时 AI 返回格式异常。原始返回（前 500 字符）：%s',
-				$index,
-				mb_substr( $result['text'], 0, 500, 'UTF-8' )
-			) );
-			WAISG_Logger::log( 0, 'generate', 'AI 返回格式异常（无法解析 JSON）', '第 ' . $index . ' 篇' );
+			WAISG_Logger::log( 0, 'generate', 'AI 返回格式异常（无法解析 JSON）', '第 ' . $index . ' 篇 ｜AI返回：' . mb_substr( $result['text'], 0, 300, 'UTF-8' ) );
 			wp_send_json_error( array(
 				'message' => '第 ' . $index . ' 篇 AI 返回格式异常，请重试。',
 				'index'   => $index,
@@ -136,19 +132,33 @@ class WAISG_Generator {
 		$seo_desc     = sanitize_textarea_field( $data['seo_description'] ?? '' );
 		$seo_kw       = sanitize_text_field( $data['seo_keywords']    ?? '' );
 
-		// 降低 AI 痕迹：先二次润色（如开启），再外层兜底替换 AI 高频词
+		// 降低 AI 痕迹：先二次润色（如开启且未跳过），再外层兜底替换 AI 高频词
 		if ( ! empty( $post_content ) ) {
-			if ( WAISG_Settings::get( 'humanize_enabled', 0 ) ) {
-				$post_content = WAISG_AI_API::humanize( $post_content );
+			if ( ! $skip_humanize && WAISG_Settings::get( 'humanize_enabled', 0 ) ) {
+				$post_content = WAISG_AI_API::humanize( $post_content, $use_model );
 			}
 			$post_content = WAISG_AI_API::filter_ai_phrases( $post_content );
 		}
 
 		// 如果需要插入图片，先获取图片并插入正文
 		$image_source = WAISG_Settings::get( 'image_source', 'none' );
+		$image_note  = ''; // 配图结果诊断（成功为空，失败带原因）
 		if ( $image_source !== 'none' ) {
 			$image_keyword = ! empty( $keywords ) ? $keywords : $topic;
-			$post_content  = $this->insert_images_into_content( $post_content, $image_keyword );
+			// 透传文章语言给配图逻辑——AI 生成图按语言切换 prompt 模板，避免中英混杂降低模型理解
+			$post_language = sanitize_text_field( wp_unslash( $_POST['language'] ?? 'zh-CN' ) );
+			$before_len    = strlen( $post_content );
+			$post_content  = $this->insert_images_into_content( $post_content, $image_keyword, $post_language );
+			// 若正文长度没变 = 一张图都没插进去——诊断原因给用户
+			if ( strlen( $post_content ) === $before_len ) {
+				$probe = $this->fetch_images( $image_keyword, 1, array(), $post_language );
+				if ( is_wp_error( $probe ) ) {
+					$image_note = '配图失败：' . wp_strip_all_tags( $probe->get_error_message() );
+				} else {
+					$image_note = '配图失败：API 正常但未返回图片（可能关键词太冷门或额度耗尽）';
+				}
+				WAISG_Logger::log( 0, 'generate', $image_note, '关键词：' . $image_keyword . ' ｜来源：' . $image_source );
+			}
 		}
 
 		// SEO 本地修复（零 Token）
@@ -191,6 +201,8 @@ class WAISG_Generator {
 			'seo_title'    => $seo_title,
 			'seo_desc'     => $seo_desc,
 			'seo_kw'       => $seo_kw,
+			'recovered'    => $data['_recovered'] ?? '',
+			'image_note'   => $image_note,
 		) );
 	}
 
@@ -206,31 +218,89 @@ class WAISG_Generator {
 	 * @param string $keyword  搜图关键词
 	 * @return string 插入图片后的正文
 	 */
-	private function insert_images_into_content( $content, $keyword ) {
+	/**
+	 * 在正文 <h2>/<h3> 处插入图片。
+	 *
+	 * 节级关键词优化：第 2+ 张图按所在小节的标题文本搜/生成，不再全文共用一个关键词——
+	 * 每张图都贴合所在小节的主题，配图匹配度大幅提升。
+	 * 第 1 张图仍用总关键词（文章开头配总图，统领全文主题）。
+	 *
+	 * @param string $content  原始正文 HTML
+	 * @param string $keyword  总关键词（第 1 张图用）
+	 * @param string $language 文章语言（zh-CN/en-US 等），透传给 AI 生成图按语言切换 prompt 模板
+	 * @return string 插入图片后的正文
+	 */
+	private function insert_images_into_content( $content, $keyword, $language = 'zh-CN' ) {
 		$images_per_post = (int) WAISG_Settings::get( 'images_per_post', 2 );
 		if ( $images_per_post < 1 ) return $content;
 
-		$images = $this->fetch_images( $keyword, $images_per_post );
-		if ( empty( $images ) ) return $content;
+		// 区分图源（v1.9.9）：AI 生图用原始中文标题直接做 prompt（AI 懂多语言，贴合主题具体场景），
+		// Pexels/Unsplash 实景库才调 extract_and_translate 翻译成简洁英文搜图词（实景库要简洁名词才搜得到）。
+		// 旧版不区分——翻译后简洁英文词喂给 AI 生图致主题具体场景丢失，画出来的图不贴合。
+		$img_source = WAISG_Settings::get( 'image_source', 'none' );
+		$is_ai_img  = ( $img_source === 'ai_image' );
+
+		// AI 生图时用总关键词识别题材一次，透传给各张图——避免节标题不含题材特征词时
+		// （如游戏攻略的"矿场南侧山腰房"不含游戏词）误回退通用扁平插画风。
+		$img_category = '';
+		if ( $is_ai_img ) {
+			$img_category = self::image_style_hint( $keyword )['category'] ?? '';
+		}
+
+		// 先取各 <h2>/<h3> 小节的标题文本，作为节级关键词候选
+		$section_titles = array();
+		if ( preg_match_all( '#<h[23][^>]*>(.*?)</h[23]>#i', $content, $m ) ) {
+			foreach ( $m[1] as $heading_html ) {
+				// 剥 HTML 标签得到纯文本标题（标题里可能嵌套 <span>/<a> 等）
+				$title = trim( wp_strip_all_tags( $heading_html ) );
+				if ( $title !== '' ) $section_titles[] = $title;
+			}
+		}
 
 		$inserted = 0;
-		// 在第一个 <h2> 前插入第一张图片，其余在后续 <h2>/<h3> 后插入
-		foreach ( $images as $img ) {
+
+		// 第 1 张：用总关键词，插到正文最开头
+		// AI 生图用原始总关键词直接做 prompt；实景库用翻译后简洁英文搜图词
+		$first_kw = $is_ai_img ? $keyword : self::extract_and_translate( $keyword, $language );
+		$first_images = $this->fetch_images( $first_kw, 1, array(), $language, $img_category );
+		if ( ! is_wp_error( $first_images ) && ! empty( $first_images ) ) {
+			$first_img = $first_images[0];
+			// Alt 用原始总关键词（中文文章配中文 Alt），不用翻译后英文搜图词也不用 Pexels/Unsplash 自带的英文 alt_description
+			$content = sprintf(
+				'<figure class="waisg-gen-image"><img src="%s" alt="%s" style="max-width:100%%;height:auto;" /></figure>',
+				esc_url( $first_img['url'] ),
+				esc_attr( $keyword )
+			) . "\n" . $content;
+			$inserted++;
+		}
+
+		// 后续张：按第 N 个小节标题搜/生成，插到该 <h2>/<h3> 之后
+		// $inserted 跟已插入张数，$section_idx 跟取到哪一节的标题——两值独立，
+		// 节级搜图失败时 $inserted 仍 ++（占配额），但 $section_idx 也 ++ 跳下一节，
+		// 避免错位取标题；节标题用尽回退总关键词。
+		$section_idx = 1; // 第 0 节留给第 1 张总图用过了
+		while ( $inserted < $images_per_post ) {
+			$raw_title = isset( $section_titles[ $section_idx ] ) ? $section_titles[ $section_idx ] : $keyword;
+			$section_idx++;
+			// AI 生图用原始中文节标题直接做 prompt（贴合该节具体场景）；
+			// 实景库才调 extract_and_translate 产简洁英文搜图词。失败回退总关键词。
+			$section_kw = $is_ai_img ? $raw_title : self::extract_and_translate( $raw_title, $language );
+			$more_images = $this->fetch_images( $section_kw, 1, array(), $language, $img_category );
+			if ( is_wp_error( $more_images ) || empty( $more_images ) ) {
+				// 节级搜图失败不应阻断——跳过这张继续下一节
+				$inserted++;
+				continue;
+			}
+			$img = $more_images[0];
+			// Alt 用节级原始中文标题（贴合该节主题），不用翻译后英文搜图词也不用 Pexels/Unsplash 自带的英文 alt_description
 			$img_html = sprintf(
 				'<figure class="waisg-gen-image"><img src="%s" alt="%s" style="max-width:100%%;height:auto;" /></figure>',
 				esc_url( $img['url'] ),
-				esc_attr( $img['alt'] )
+				esc_attr( $raw_title )
 			);
-
-			if ( $inserted === 0 ) {
-				// 第一张：插入到正文最开头
-				$content = $img_html . "\n" . $content;
-			} else {
-				// 后续：插入到第 N 个 <h2> 或 <h3> 标签之后
-				$content = $this->inject_after_heading( $content, $img_html, $inserted );
-			}
+			// 插到第 (inserted) 个 <h2>/<h3> 之后——与旧行为一致的位置规则
+			$content = $this->inject_after_heading( $content, $img_html, $inserted );
 			$inserted++;
-			if ( $inserted >= $images_per_post ) break;
 		}
 
 		return $content;
@@ -263,39 +333,237 @@ class WAISG_Generator {
 	 * @param int    $count
 	 * @return array [ ['url'=>'...', 'alt'=>'...'], ... ]
 	 */
-	public function fetch_images( $keyword, $count = 2 ) {
-		$source = WAISG_Settings::get( 'image_source', 'none' );
-
-		if ( $source === 'none' ) return array();
-
-		if ( $source === 'ai_image' ) {
-			return $this->fetch_ai_images( $keyword, $count );
-		}
-
-		$api_key = WAISG_Settings::get( 'image_api_key', '' );
-		if ( empty( $api_key ) ) return array();
-
-		if ( $source === 'pexels' ) {
-			return $this->fetch_pexels( $keyword, $count, $api_key );
-		}
-		if ( $source === 'unsplash' ) {
-			return $this->fetch_unsplash( $keyword, $count, $api_key );
-		}
-
-		return array();
+	/**
+	 * 把搜图关键词翻成英文（Pexels/Unsplash 是英文索引库，中文关键词搜不出对图）。
+	 * 调 AI 大模型轻量翻译，失败或已是英文则原样返回——不阻断配图。
+	 */
+	/**
+	 * 一步从节级标题/中文关键词产出最适合搜图的英文关键词（提取核心名词 + 翻译合并）。
+	 * 减少中间精度损失——比起"先提取再翻译"两步，一步让 AI 理解整句语义产出更准的搜图词。
+	 * 失败回退原标题。非中文语言直接返回原词（英文文章用英文关键词搜英文库本来就对）。
+	 */
+	private static function extract_and_translate( $text, $language = 'zh-CN' ) {
+		// 非中文语言直接返回，不翻译
+		if ( strpos( $language, 'zh' ) !== 0 ) return $text;
+		// 纯 ASCII 视为已是英文，省一次 API 调用
+		if ( preg_match( '/^[\x20-\x7E]+$/', $text ) ) return $text;
+		$light_model = WAISG_Settings::get( 'lightweight_model', '' );
+		// max_tokens 走设置项（v1.9.9）：推理模型思考会吃配额，旧版写死 200 导致返空触发重试
+		$kw_max = (int) WAISG_Settings::get( 'image_keyword_max_tokens', 200 );
+		$extra = array( 'max_tokens' => $kw_max, 'temperature' => 0.1 );
+		if ( $light_model !== '' ) $extra['model'] = $light_model;
+		$resp = WAISG_AI_API::call(
+			'You are finding the best IMAGE SEARCH keyword for a stock photo site (Pexels/Unsplash). '
+			. 'Given a Chinese section title or keyword, output 1-3 English keywords that will find the most RELEVANT photo. '
+			. 'Understand Chinese internet slang / gaming jargon — e.g. "吃鸡" means "battle royale game" (NOT "chicken dinner"), '
+			. '"种草" means "product recommendation", "拔草" means "product review". '
+			. 'Extract the MAIN SUBJECT and translate to English. Return ONLY the English keyword(s), nothing else. '
+			. 'Input: ' . $text,
+			'You output image search keywords only.',
+			$extra
+		);
+		if ( is_wp_error( $resp ) ) return $text; // 失败回退原标题
+		$en = trim( $resp['text'] ?? '' );
+		$en = trim( $en, "\"'.,;!?。．，；！？" );
+		return $en !== '' ? $en : $text;
 	}
 
-	/** 调用 AI 大模型接口生成图片（兼容 OpenAI /v1/images/generations） */
-	private function fetch_ai_images( $keyword, $count ) {
-		$api_url = WAISG_Settings::get( 'image_ai_url', '' );
-		$api_key = WAISG_Settings::get( 'image_ai_key', '' );
-		$model   = WAISG_Settings::get( 'image_ai_model', 'dall-e-3' );
-		$size    = WAISG_Settings::get( 'image_ai_size', '1024x1024' );
+	/**
+	 * 从节级标题（一整句话）里提取 1-3 个核心名词作搜图关键词。
+	 * 节级标题如"为什么吃鸡还没凉？咱们看数据说话"直接当搜图词搜不准，
+	 * 提取出核心主题"吃鸡"再搜才能配对图。调 AI 轻量模型，失败回退原标题。
+	 *
+	 * 已被 extract_and_translate() 取代（一步提取+翻译合并减少精度损失）——
+	 * 此方法保留供未来单独调用场景，暂无调用方。
+	 * @deprecated 3.0.0 使用 extract_and_translate() 替代
+	 */
+	private static function extract_image_keyword( $section_title, $language = 'zh-CN' ) {
+		// 短标题（≤8 字符）直接当搜图词，省一次 API 调用
+		if ( mb_strlen( $section_title, 'UTF-8' ) <= 8 ) return $section_title;
+		$light_model = WAISG_Settings::get( 'lightweight_model', '' );
+		$extra = array( 'max_tokens' => 100, 'temperature' => 0.1 );
+		if ( $light_model !== '' ) $extra['model'] = $light_model;
+		$prompt = 'Extract 1-3 core nouns (the main subject) from the following section title for IMAGE SEARCH. '
+			. 'Return ONLY the extracted keywords, nothing else. '
+			. 'Understand Chinese context — e.g. from "为什么吃鸡还没凉" extract "吃鸡" (the game genre). '
+			. 'Title: ' . $section_title;
+		$resp = WAISG_AI_API::call( $prompt, 'You extract image search keywords. Output only the keywords.', $extra );
+		if ( is_wp_error( $resp ) ) return $section_title; // 失败回退原标题
+		$kw = trim( $resp['text'] ?? '' );
+		$kw = trim( $kw, "\"'.,;!?。．，；！？" );
+		return $kw !== '' ? $kw : $section_title;
+	}
 
-		if ( empty( $api_url ) || empty( $api_key ) ) return array();
+	/**
+	 * 把搜图关键词翻成英文（Pexels/Unsplash 是英文索引库，中文关键词搜不出对图）。
+	 *
+	 * 已被 extract_and_translate() 取代（一步提取+翻译合并减少精度损失）——
+	 * 此方法保留供未来单独调用场景，暂无调用方。
+	 * @deprecated 3.0.0 使用 extract_and_translate() 替代
+	 */
+	private static function translate_keyword_for_stock( $keyword, $language = 'zh-CN' ) {
+		// 按输出语言判：非中文语言直接返回，不翻译（英文文章用英文关键词搜英文库本来就对）
+		if ( strpos( $language, 'zh' ) !== 0 ) return $keyword;
+		// 简判：纯 ASCII 视为已是英文（如中文文章但关键词恰好是英文词 PUBG），直接返回省一次 API 调用
+		if ( preg_match( '/^[\x20-\x7E]+$/', $keyword ) ) return $keyword;
+		// 翻译用轻量模型（非推理），不走主推理模型——推理模型会把 max_tokens 全用于思考导致返空
+		$light_model = WAISG_Settings::get( 'lightweight_model', '' );
+		// max_tokens 走设置项（v1.9.9）：推理模型思考会吃配额，旧版写死 200 导致返空触发重试
+		$kw_max = (int) WAISG_Settings::get( 'image_keyword_max_tokens', 200 );
+		$extra = array(
+			'max_tokens'  => $kw_max,    // 翻译输出很短，但留够余量避免偶发截断
+			'temperature' => 0.1,    // 翻译要稳定不要发散
+		);
+		if ( $light_model !== '' ) {
+			$extra['model'] = $light_model;
+		}
+		$resp = WAISG_AI_API::call(
+			'Translate the following Chinese keyword into English for IMAGE SEARCH on English stock photo sites (Pexels/Unsplash). '
+			. 'Understand Chinese internet slang / gaming jargon — e.g. "吃鸡" means "battle royale game" (NOT "chicken dinner"), '
+			. '"种草" means "product recommendation", "拔草" means "product review". '
+			. 'Return ONLY the English keyword(s) for image search, nothing else. Keyword: ' . $keyword,
+			'You are a translation API for image search keywords. Output only the translated English keyword.',
+			$extra
+		);
+		if ( is_wp_error( $resp ) ) return $keyword; // 翻译失败不阻断，用原中文搜（Pexels 也能搜部分中文）
+		$en = trim( $resp['text'] ?? '' );
+		// 剥可能的引号/句末标点，只留关键词本身
+		$en = trim( $en, "\"'.,;!?。．，；！？" );
+		return $en !== '' ? $en : $keyword;
+	}
 
-		$prompt = 'A high-quality illustration related to: ' . $keyword . '. Clean, professional, suitable for an article.';
+	/**
+	 * 获取图片。
+	 * @param string $keyword  搜图关键词
+	 * @param int    $count    每次获取张数
+	 * @param array  $override 表单即时值（测试搜图按钮用，绕过数据库）
+	 * @param string $language 文章语言（zh-CN/en-US 等），透传给 AI 生成图按语言切换 prompt 模板
+	 * @return array|WP_Error  图片数组，或 WP_Error（API 拒绝/格式异常/未配置）
+	 */
+	public function fetch_images( $keyword, $count = 2, $override = array(), $language = 'zh-CN', $category_override = '' ) {
+		$source = $override['image_source'] ?? WAISG_Settings::get( 'image_source', 'none' );
 
+		if ( $source === 'none' ) return new WP_Error( 'no_source', '未选择图片来源，请在设置中先选 Pexels / Unsplash / AI 大模型生成。' );
+
+		if ( $source === 'ai_image' ) {
+			// 题材类别透传给 fetch_ai_images（节标题不含题材特征词时用总关键词识别的类别兜底）
+			return $this->fetch_ai_images( $keyword, $count, $override, $language, $category_override );
+		}
+
+		// Pexels / Unsplash 各自独立的 Key 字段——按当前来源取对应那个，回退兼容旧共用 image_api_key 字段
+		$api_key = '';
+		if ( $source === 'pexels' ) {
+			$api_key = $override['image_api_key_pexels'] ?? WAISG_Settings::get( 'image_api_key_pexels', '' );
+		} elseif ( $source === 'unsplash' ) {
+			$api_key = $override['image_api_key_unsplash'] ?? WAISG_Settings::get( 'image_api_key_unsplash', '' );
+		}
+		// 兼容旧用户：新字段为空时回退旧共用字段（迁移前数据）
+		if ( empty( $api_key ) ) {
+			$api_key = WAISG_Settings::get( 'image_api_key', '' );
+		}
+		if ( empty( $api_key ) ) return new WP_Error( 'no_key', '未配置图片 API Key。' );
+
+		if ( $source === 'pexels' ) {
+			// Pexels/Unsplash 是英文索引库，中文关键词搜不出对图——一步调 AI 产出最适合搜图的英文关键词
+			// （提取核心名词+翻译合并，减少中间精度损失）。按输出语言判，中文才调，英文/其他直接用原词。
+			$en_kw = self::extract_and_translate( $keyword, $language );
+			return $this->fetch_pexels( $en_kw, $count, $api_key );
+		}
+		if ( $source === 'unsplash' ) {
+			$en_kw = self::extract_and_translate( $keyword, $language );
+			return $this->fetch_unsplash( $en_kw, $count, $api_key );
+		}
+
+		return new WP_Error( 'bad_source', '未知的图片来源：' . $source );
+	}
+
+	/**
+	 * 调用 AI 大模型接口生成图片（兼容 OpenAI /v1/images/generations）
+	 * @return array|WP_Error  图片数组（含 url/alt），或 WP_Error（API 拒绝/格式异常）
+	 */
+	/**
+	 * 按关键词题材分派视觉风格指令（v1.9.9 新增）。
+	 *
+	 * 提升AI生成图与文章主题的贴合度——旧版笼统的"一张高质量插画"对题材描述不足，
+	 * 模型产出偏抽象通用图。改用关键词匹配分派题材类别，每类给具体的视觉风格指令
+	 * （视角/元素/画风/配色），让模型产出贴合主题的图。题材分类是有限枚举可硬编码，
+	 * 零API调用，比让AI再识别题材更省。
+	 *
+	 * @param string $keyword 已经是搜图用的英文/中文关键词
+	 * @return array {'zh'=>中文风格指令, 'en'=>英文风格指令}
+	 */
+	private static function image_style_hint( $keyword, $category_override = '' ) {
+		// 题材表从面板设置项读（v1.9.9 新增）——留空用内置默认 14 套+default 兜底，
+		// 用户改了存 waisg_settings['image_style_table']，运行时解析成题材数组。
+		// 旧版硬编码题材表已迁到 class-settings.php::get_default_image_style_table。
+		$table = WAISG_Settings::parse_image_style_table( WAISG_Settings::get( 'image_style_table', '' ) );
+
+		// 调用方透传题材类别时直接用，避免节标题不含题材特征词时误回退通用风格
+		// （如游戏攻略的"矿场南侧山腰房"节标题不含游戏词，但文章总关键词"和平精英"含）
+		$category = $category_override;
+		if ( $category === '' ) {
+			// 按题材表里声明的顺序优先级匹配——用户可在面板上调整题材顺序控制命中优先级
+			$kw_lower = mb_strtolower( $keyword, 'UTF-8' );
+			foreach ( $table as $cat => $row ) {
+				// default 行无特征词，跳过匹配
+				if ( empty( $row['words'] ) ) continue;
+				foreach ( $row['words'] as $w ) {
+					if ( mb_stripos( $kw_lower, mb_strtolower( $w, 'UTF-8' ), 0, 'UTF-8' ) !== false ) {
+						$category = $cat;
+						break 2;
+					}
+				}
+			}
+		}
+
+		// 命中题材：用该题材的中英双版风格指令
+		if ( $category !== '' && isset( $table[ $category ] ) ) {
+			$return = $table[ $category ];
+			$return['category'] = $category;
+			return $return;
+		}
+
+		// 未命中：用 default 兜底行（parse_image_style_table 保证必存在）
+		$default = isset( $table['default'] ) ? $table['default'] : array( 'zh' => '', 'en' => '' );
+		$default['category'] = '';
+		return $default;
+	}
+
+	private function fetch_ai_images( $keyword, $count, $override = array(), $language = 'zh-CN', $category_override = '' ) {
+		$api_url = $override['image_ai_url']   ?? WAISG_Settings::get( 'image_ai_url', '' );
+		$api_key = $override['image_ai_key']   ?? WAISG_Settings::get( 'image_ai_key', '' );
+		$model   = $override['image_ai_model'] ?? WAISG_Settings::get( 'image_ai_model', 'dall-e-3' );
+		$size    = $override['image_ai_size']  ?? WAISG_Settings::get( 'image_ai_size', '1024x1024' );
+
+		if ( empty( $api_url ) ) return new WP_Error( 'no_url', '未配置图片生成 API 地址。' );
+		if ( empty( $api_key ) ) return new WP_Error( 'no_key', '未配置图片生成 API Key。' );
+
+		// 按题材类别给具体视觉风格指令，而非笼统的"插画"——提升 AI 生成图与文章主题的贴合度（v1.9.9）。
+		// 题材识别用关键词匹配分派（零 API 调用），未命中的回退通用风格。
+		// 调用方可透传 $category_override（如 insert_images_into_content 入口用总关键词识别一次透传给各张图），
+		// 避免节标题不含题材特征词时（如"矿场南侧山腰房"不含游戏词）误回退通用风格。
+		$style_hint = self::image_style_hint( $keyword, $category_override );
+
+		// 按文章语言切换 prompt 模板——避免中英混杂降低模型对关键词的理解精度。
+		// 中文文章用中文 prompt，英文文章用英文 prompt，其他语言回退英文模板。
+		if ( strpos( $language, 'zh' ) === 0 ) {
+			$prompt = $keyword . '。' . $style_hint['zh'];
+		} else {
+			$prompt = $keyword . '. ' . $style_hint['en'];
+		}
+
+		// 按地址自动识别图片 API 协议（v1.9.9 新增）——和文章大模型一样支持多类型接口，
+		// 避免只认 OpenAI 格式致其他平台填了地址也用不了。三分支各自构造请求体和解析响应。
+		$proto = self::detect_image_protocol( $api_url );
+
+		if ( $proto === 'gemini' ) {
+			return self::fetch_gemini_image( $api_url, $api_key, $model, $prompt, $count, $size, $keyword );
+		}
+		if ( $proto === 'sdwebui' ) {
+			return self::fetch_sdwebui_image( $api_url, $api_key, $prompt, $count, $size, $keyword );
+		}
+
+		// 默认 openai 兼容格式（/v1/images/generations）——OpenAI dall-e-3 / 国产中转 / 阿里通义万相 / 智谱等大多走此格式
 		$body = array(
 			'model'  => $model,
 			'prompt' => $prompt,
@@ -304,7 +572,7 @@ class WAISG_Generator {
 		);
 
 		$response = wp_remote_post( $api_url, array(
-			'timeout' => 60,
+			'timeout' => 120,
 			'headers' => array(
 				'Content-Type'  => 'application/json',
 				'Authorization' => 'Bearer ' . $api_key,
@@ -312,14 +580,32 @@ class WAISG_Generator {
 			'body' => wp_json_encode( $body ),
 		) );
 
-		if ( is_wp_error( $response ) ) return array();
+		if ( is_wp_error( $response ) ) {
+			return new WP_Error( 'request_failed', '图片 API 请求失败：' . $response->get_error_message() );
+		}
 
-		$data = json_decode( wp_remote_retrieve_body( $response ), true );
-		if ( empty( $data['data'] ) || ! is_array( $data['data'] ) ) return array();
+		$code = wp_remote_retrieve_response_code( $response );
+		$raw  = wp_remote_retrieve_body( $response );
+		$data = json_decode( $raw, true );
+		if ( $code < 200 || $code >= 300 ) {
+			$api_err = '';
+			if ( is_array( $data ) ) {
+				$api_err = $data['error']['message'] ?? $data['error']['code'] ?? $data['message'] ?? '';
+			}
+			$api_err = $api_err !== '' ? $api_err : mb_substr( $raw, 0, 200, 'UTF-8' );
+			return new WP_Error( 'api_error', sprintf( '图片 API 返回 HTTP %d：%s', $code, $api_err ) );
+		}
+		if ( empty( $data['data'] ) || ! is_array( $data['data'] ) ) {
+			return new WP_Error( 'bad_format', '图片 API 返回格式异常（缺少 data 字段）。' );
+		}
 
 		$images = array();
 		foreach ( $data['data'] as $item ) {
+			// OpenAI 格式优先取 url；部分中转平台把图放 b64_json 字段（base64 编码图）
 			$url = $item['url'] ?? '';
+			if ( empty( $url ) && ! empty( $item['b64_json'] ) ) {
+				$url = 'data:image/png;base64,' . $item['b64_json'];
+			}
 			if ( empty( $url ) ) continue;
 			$images[] = array( 'url' => $url, 'alt' => $keyword );
 		}
@@ -327,12 +613,165 @@ class WAISG_Generator {
 		return $images;
 	}
 
-	/** 从 Pexels 获取图片 */
+	/**
+	 * 识别图片 API 协议（v1.9.9 新增）。
+	 *
+	 * 和文章大模型的 detect_protocol 思路一致——按 API 地址特征自动选协议分支，
+	 * 避免只认 OpenAI 格式致其他平台填了地址也用不了。
+	 *
+	 * @param string $api_url 用户配置的图片生成 API 地址
+	 * @return string 'openai'(默认) | 'gemini' | 'sdwebui'
+	 */
+	private static function detect_image_protocol( $api_url ) {
+		$u = strtolower( trim( (string) $api_url ) );
+		// Google Gemini Imagen：generativelanguage.googleapis.com + :predict 端
+		if ( strpos( $u, 'googleapis' ) !== false
+			&& ( strpos( $u, ':predict' ) !== false || strpos( $u, 'imagen' ) !== false ) ) {
+			return 'gemini';
+		}
+		// Stable Diffusion WebUI（AUTOMATIC1111）：/sdapi/v1/txt2img 或 /sdapi/v1/img2img
+		if ( strpos( $u, '/sdapi/' ) !== false || strpos( $u, 'txt2img' ) !== false || strpos( $u, 'img2img' ) !== false ) {
+			return 'sdwebui';
+		}
+		return 'openai';
+	}
+
+	/**
+	 * Google Gemini Imagen 接口（v1.9.9 新增）。
+	 * 端点：POST https://generativelanguage.googleapis.com/v1beta/models/imagen-3.0:predict
+	 * 鉴权：URL Query ?key=API_KEY
+	 * 请求体：{"instances":[{"prompt":"..."}],"parameters":{"sampleCount":N}}
+	 * 响应：{"predictions":[{"bytesBase64Encoded":"...","mimeType":"image/png"}]}
+	 */
+	private static function fetch_gemini_image( $api_url, $api_key, $model, $prompt, $count, $size, $keyword ) {
+		// Gemini 鉴权用 Query key，不是 Bearer Header
+		$endpoint = add_query_arg( array( 'key' => $api_key ), $api_url );
+
+		// Gemini Imagen 当前不通过 API 支持 size 参数（固定 1024x1024），忽略用户填的 size
+		$body = array(
+			'instances' => array(
+				array( 'prompt' => $prompt ),
+			),
+			'parameters' => array(
+				'sampleCount' => min( $count, 4 ), // Imagen 上限 4 张
+			),
+		);
+
+		$response = wp_remote_post( $endpoint, array(
+			'timeout' => 120,
+			'headers' => array( 'Content-Type' => 'application/json' ),
+			'body'    => wp_json_encode( $body ),
+		) );
+
+		if ( is_wp_error( $response ) ) {
+			return new WP_Error( 'request_failed', 'Gemini 图片 API 请求失败：' . $response->get_error_message() );
+		}
+
+		$code = wp_remote_retrieve_response_code( $response );
+		$raw  = wp_remote_retrieve_body( $response );
+		$data = json_decode( $raw, true );
+		if ( $code < 200 || $code >= 300 ) {
+			$api_err = is_array( $data ) ? ( $data['error']['message'] ?? $data['message'] ?? '' ) : '';
+			$api_err = $api_err !== '' ? $api_err : mb_substr( $raw, 0, 200, 'UTF-8' );
+			return new WP_Error( 'api_error', sprintf( 'Gemini 图片 API 返回 HTTP %d：%s', $code, $api_err ) );
+		}
+		if ( empty( $data['predictions'] ) || ! is_array( $data['predictions'] ) ) {
+			return new WP_Error( 'bad_format', 'Gemini 图片 API 返回格式异常（缺少 predictions 字段）。' );
+		}
+
+		$images = array();
+		foreach ( $data['predictions'] as $pred ) {
+			$b64 = $pred['bytesBase64Encoded'] ?? '';
+			if ( empty( $b64 ) ) continue;
+			$mime = $pred['mimeType'] ?? 'image/png';
+			$images[] = array(
+				'url' => 'data:' . $mime . ';base64,' . $b64,
+				'alt' => $keyword,
+			);
+		}
+		return $images;
+	}
+
+	/**
+	 * Stable Diffusion WebUI（AUTOMATIC1111）接口（v1.9.9 新增）。
+	 * 端点：POST http://localhost:7860/sdapi/v1/txt2img
+	 * 鉴权：可选（启用 --auth 时用 Basic Auth，否则无鉴权）
+	 * 请求体：{"prompt":"...","batch_size":N,"width":W,"height":H,"steps":20,"cfg_scale":7}
+	 * 响应：{"images":["base64...","base64..."]}（base64 数组，无 data:// 前缀）
+	 */
+	private static function fetch_sdwebui_image( $api_url, $api_key, $prompt, $count, $size, $keyword ) {
+		// 解析 "宽x高" 格式——SD WebUI 用 width/height 两个独立字段
+		$width  = 1024;
+		$height = 1024;
+		if ( preg_match( '/^(\d{2,5})x(\d{2,5})$/i', $size, $m ) ) {
+			$width  = (int) $m[1];
+			$height = (int) $m[2];
+		}
+
+		$body = array(
+			'prompt'      => $prompt,
+			'batch_size'  => min( $count, 4 ), // SD WebUI batch_size 上限受显存约束，保守 4
+			'width'       => $width,
+			'height'      => $height,
+			'steps'       => 20,      // 默认采样步数，够用不慢
+			'cfg_scale'   => 7,       // 默认提示词相关性
+			'sampler_name' => 'Euler a', // 快速稳定的采样器
+		);
+
+		// 鉴权：SD WebUI 启用 --auth 时用 Basic Auth，api_key 格式约定为 "user:pass"
+		// 多数本地部署无鉴权，api_key 填空或不填 "user:pass" 都跳过
+		$auth_header = null;
+		if ( $api_key !== '' && strpos( $api_key, ':' ) !== false ) {
+			$auth_header = 'Basic ' . base64_encode( $api_key );
+		}
+
+		$req = array(
+			'timeout' => 120, // SD WebUI 生图比 dall-e 慢，放宽到 120s
+			'headers' => array( 'Content-Type' => 'application/json' ),
+			'body'    => wp_json_encode( $body ),
+		);
+		if ( $auth_header !== null ) {
+			$req['headers']['Authorization'] = $auth_header;
+		}
+
+		$response = wp_remote_post( $api_url, $req );
+
+		if ( is_wp_error( $response ) ) {
+			return new WP_Error( 'request_failed', 'SD WebUI 图片 API 请求失败：' . $response->get_error_message() );
+		}
+
+		$code = wp_remote_retrieve_response_code( $response );
+		$raw  = wp_remote_retrieve_body( $response );
+		$data = json_decode( $raw, true );
+		if ( $code < 200 || $code >= 300 ) {
+			$api_err = is_array( $data ) ? ( $data['detail'] ?? $data['error'] ?? $data['message'] ?? '' ) : '';
+			$api_err = $api_err !== '' ? $api_err : mb_substr( $raw, 0, 200, 'UTF-8' );
+			return new WP_Error( 'api_error', sprintf( 'SD WebUI 图片 API 返回 HTTP %d：%s', $code, $api_err ) );
+		}
+		if ( empty( $data['images'] ) || ! is_array( $data['images'] ) ) {
+			return new WP_Error( 'bad_format', 'SD WebUI 图片 API 返回格式异常（缺少 images 字段）。' );
+		}
+
+		$images = array();
+		foreach ( $data['images'] as $b64 ) {
+			if ( ! is_string( $b64 ) || $b64 === '' ) continue;
+			// SD WebUI 返回的 base64 不带 data:// 前缀，统一补上以适配 <img src>
+			$images[] = array(
+				'url' => 'data:image/png;base64,' . $b64,
+				'alt' => $keyword,
+			);
+		}
+		return $images;
+	}
+
+	/** 从 Pexels 获取图片。@return array|WP_Error */
 	private function fetch_pexels( $keyword, $count, $api_key ) {
+		// 加横向过滤（v1.9.9）：文章配图一般用横图，过滤掉竖图/正方图，提升可用度
 		$url = add_query_arg( array(
-			'query'   => rawurlencode( $keyword ),
-			'per_page' => $count,
-			'locale'  => 'zh-CN',
+			'query'      => rawurlencode( $keyword ),
+			'per_page'   => $count,
+			'locale'     => 'zh-CN',
+			'orientation' => 'landscape',
 		), 'https://api.pexels.com/v1/search' );
 
 		$response = wp_remote_get( $url, array(
@@ -340,9 +779,22 @@ class WAISG_Generator {
 			'timeout' => 15,
 		) );
 
-		if ( is_wp_error( $response ) ) return array();
+		if ( is_wp_error( $response ) ) {
+			return new WP_Error( 'request_failed', 'Pexels 请求失败：' . $response->get_error_message() );
+		}
 
-		$body = json_decode( wp_remote_retrieve_body( $response ), true );
+		$code = wp_remote_retrieve_response_code( $response );
+		$raw  = wp_remote_retrieve_body( $response );
+		if ( $code < 200 || $code >= 300 ) {
+			$data = json_decode( $raw, true );
+			$api_err = is_array( $data ) ? ( $data['error'] ?? '' ) : '';
+			$api_err = $api_err !== '' ? $api_err : mb_substr( $raw, 0, 200, 'UTF-8' );
+			// 401/403 = Key 无效；429 = 限速；其他原样透传
+			$hint = ( $code === 401 || $code === 403 ) ? '（API Key 无效或已失效）' : '';
+			return new WP_Error( 'api_error', sprintf( 'Pexels 返回 HTTP %d：%s%s', $code, $api_err, $hint ) );
+		}
+
+		$body = json_decode( $raw, true );
 		$images = array();
 		if ( ! empty( $body['photos'] ) ) {
 			foreach ( $body['photos'] as $photo ) {
@@ -355,19 +807,33 @@ class WAISG_Generator {
 		return $images;
 	}
 
-	/** 从 Unsplash 获取图片 */
+	/** 从 Unsplash 获取图片。@return array|WP_Error */
 	private function fetch_unsplash( $keyword, $count, $api_key ) {
+		// 加横向过滤（v1.9.9）：文章配图一般用横图，过滤掉竖图/正方图，提升可用度
 		$url = add_query_arg( array(
 			'query'       => rawurlencode( $keyword ),
 			'per_page'    => $count,
 			'client_id'   => $api_key,
+			'orientation' => 'landscape',
 		), 'https://api.unsplash.com/search/photos' );
 
 		$response = wp_remote_get( $url, array( 'timeout' => 15 ) );
 
-		if ( is_wp_error( $response ) ) return array();
+		if ( is_wp_error( $response ) ) {
+			return new WP_Error( 'request_failed', 'Unsplash 请求失败：' . $response->get_error_message() );
+		}
 
-		$body = json_decode( wp_remote_retrieve_body( $response ), true );
+		$code = wp_remote_retrieve_response_code( $response );
+		$raw  = wp_remote_retrieve_body( $response );
+		if ( $code < 200 || $code >= 300 ) {
+			$data = json_decode( $raw, true );
+			$api_err = is_array( $data ) ? ( $data['error'] ?? $data['message'] ?? '' ) : '';
+			$api_err = $api_err !== '' ? $api_err : mb_substr( $raw, 0, 200, 'UTF-8' );
+			$hint = ( $code === 401 || $code === 403 ) ? '（Access Key 无效或已失效）' : '';
+			return new WP_Error( 'api_error', sprintf( 'Unsplash 返回 HTTP %d：%s%s', $code, $api_err, $hint ) );
+		}
+
+		$body = json_decode( $raw, true );
 		$images = array();
 		if ( ! empty( $body['results'] ) ) {
 			foreach ( $body['results'] as $photo ) {
@@ -392,6 +858,9 @@ class WAISG_Generator {
 		if ( empty( $keyword ) ) wp_send_json_error( array( 'message' => '请输入关键词。' ) );
 
 		$images = $this->fetch_images( $keyword, $count );
+		if ( is_wp_error( $images ) ) {
+			wp_send_json_error( array( 'message' => wp_strip_all_tags( $images->get_error_message() ) ) );
+		}
 		wp_send_json_success( array( 'images' => $images ) );
 	}
 
@@ -452,6 +921,7 @@ class WAISG_Generator {
 		$index       = absint( $_POST['index'] ?? 1 );
 		$template_id = absint( $_POST['template_id'] ?? 0 );
 		$model_override = sanitize_key( $_POST['model_override'] ?? '' );
+		$skip_humanize  = ! empty( $_POST['skip_humanize'] );
 		$template    = null;
 		if ( $template_id ) {
 			foreach ( WAISG_Settings::get_templates() as $tpl ) {
@@ -487,18 +957,14 @@ class WAISG_Generator {
 		if ( is_wp_error( $result ) ) {
 			WAISG_Logger::log( 0, 'rewrite', $result->get_error_message(), '第 ' . $index . ' 篇' );
 			wp_send_json_error( array(
-				'message' => '改写请求失败：' . $result->get_error_message(),
+				'message' => '改写请求失败：' . wp_strip_all_tags( $result->get_error_message() ),
 				'index'   => $index,
 			) );
 		}
 
-		$data = WAISG_AI_API::parse_json_response( $result['text'] );
+		$data = WAISG_AI_API::parse_json_response( $result['text'], 'rewrite', 0 );
 		if ( ! $data ) {
-			error_log( sprintf(
-				'[WAISG] 改写文章时 AI 返回格式异常。原始返回（前 500 字符）：%s',
-				mb_substr( $result['text'], 0, 500, 'UTF-8' )
-			) );
-			WAISG_Logger::log( 0, 'rewrite', 'AI 返回格式异常（无法解析 JSON）', '第 ' . $index . ' 篇' );
+			WAISG_Logger::log( 0, 'rewrite', 'AI 返回格式异常（无法解析 JSON）', '第 ' . $index . ' 篇 ｜AI返回：' . mb_substr( $result['text'], 0, 300, 'UTF-8' ) );
 			wp_send_json_error( array( 'message' => 'AI 返回格式异常，请重试。', 'index' => $index ) );
 		}
 
@@ -509,11 +975,11 @@ class WAISG_Generator {
 		$seo_desc     = sanitize_textarea_field( $data['seo_description'] ?? '' );
 		$seo_kw       = sanitize_text_field( $data['seo_keywords']    ?? '' );
 
-		// 降低 AI 痕迹：还原图片 + 二次润色（如开启）+ 外层兜底 filter
+		// 降低 AI 痕迹：还原图片 + 二次润色（如开启且未跳过）+ 外层兜底 filter
 		if ( ! empty( $post_content ) ) {
 			$post_content = WAISG_AI_API::restore_images( $post_content, $img_protected['map'] );
-			if ( WAISG_Settings::get( 'humanize_enabled', 0 ) ) {
-				$post_content = WAISG_AI_API::humanize( $post_content );
+			if ( ! $skip_humanize && WAISG_Settings::get( 'humanize_enabled', 0 ) ) {
+				$post_content = WAISG_AI_API::humanize( $post_content, $use_model );
 			}
 			$post_content = WAISG_AI_API::filter_ai_phrases( $post_content );
 		}
@@ -559,6 +1025,7 @@ class WAISG_Generator {
 				'seo_desc'     => $seo_desc,
 				'seo_kw'       => $seo_kw,
 			),
+			'recovered'  => $data['_recovered'] ?? '',
 		) );
 	}
 }

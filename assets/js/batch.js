@@ -5,18 +5,22 @@
 (function ($) {
     'use strict';
 
-    var cfg      = window['waisgCfg'] || {};
-    var ajaxurl  = cfg.ajaxurl  || '';
-    var nonce    = cfg.nonce    || '';
-    var interval = cfg.interval || 3000;
+    var cfg         = window['waisgCfg'] || {};
+    var ajaxurl     = cfg.ajaxurl  || '';
+    var nonce       = cfg.nonce    || '';
+    var interval    = cfg.interval || 3000;
+    var concurrency = Math.max(1, Math.min(5, parseInt(cfg.concurrency, 10) || 2));
 
     var queue      = [];
     var processing = false;
     var stopped    = false;
     var doneCount  = 0;
     var totalCount = 0;
+    var inFlight   = 0; // 正在飞的请求数（并发池调度用）
     var failedIds  = []; // 失败项ID列表（用于"仅重试失败项"）
-    var successIds = []; // 已成功（已暂存）项ID列表
+    var successIds = []; // 已成功（已暂存）项ID列表（会话累计，仅用于"跳过已优化"过滤，不能用于本轮统计）
+    var roundSuccess = 0; // 本轮成功数（每轮开始清零，收尾统计用）
+    var baseDone     = 0; // 断点续跑前已完成的篇数（localStorage 恢复时置为 saved.done，收尾统计要加上）
 
     // =========================================================
     // 分页状态
@@ -163,14 +167,17 @@
             return;
         }
 
-        // 重置失败列表（要重新统计本轮失败的）
-        failedIds = [];
+        // 重置本轮统计（failedIds/successIds 列表本身保留，供"跳过已优化"过滤和"仅重试失败项"使用）
+        failedIds    = [];
+        roundSuccess = 0;
+        baseDone     = 0;
 
         queue      = ids.slice();
         processing = true;
         stopped    = false;
         doneCount  = 0;
         totalCount = ids.length;
+        inFlight   = 0;
 
         saveBatchState(); // 保存初始状态到 localStorage
 
@@ -194,11 +201,14 @@
 
         queue      = failedIds.slice();
         var retryIds = failedIds.slice(); // 备份本次重试的ID
-        failedIds  = []; // 清空失败列表，重新统计
+        failedIds    = []; // 清空失败列表，重新统计
+        roundSuccess = 0;
+        baseDone     = 0;
         processing = true;
         stopped    = false;
         doneCount  = 0;
         totalCount = queue.length;
+        inFlight   = 0;
 
         // 重置这些行的状态显示
         retryIds.forEach(function(id){
@@ -227,7 +237,8 @@
     // 逐篇处理
     // =========================================================
     function processNext() {
-        if (stopped || !queue.length) {
+        // 收尾判定：队列空 + 没有飞行中的请求 → 本轮完成
+        if ((stopped || !queue.length) && inFlight <= 0) {
             processing = false;
             $('#waisg-batch-stop').hide();
             $('#waisg-batch-start').show().text('▶ 继续优化未优化项');
@@ -240,78 +251,142 @@
             if ($('.bd-apply[data-history-id]').length > 0) {
                 $('#waisg-batch-action-bar').show();
             }
-            addLog('🏁 本轮完成。成功 ' + doneCount + ' 篇' + (failedIds.length ? '，失败 ' + failedIds.length + ' 篇' : '') + '。', 'success');
+            var successCount = roundSuccess; // 本轮成功数（successIds 是会话累计值，直接取 length 会把之前轮次也算进来）
+            var failCount = failedIds.length;
+            // 本轮完成数 = 本轮成功 + 本轮失败。收尾时 inFlight 已归零，每个 ID 恰好结算一次，
+            // 且一篇只计入成功或失败其中一个列表（catch 里有防双列处理），不会重复也不会遗漏
+            var doneN = successCount + failCount;
+            // 断点续跑时加上此前已完成的篇数，才是整体进度
+            var doneOverall = baseDone + doneN;
+            // 实际完成百分比：手动停止时 doneOverall < totalCount，不应显示 100%
+            var pct = totalCount > 0 ? Math.min(100, Math.round((doneOverall / totalCount) * 100)) : 100;
+            var skipHumanize = $('#waisg-batch-skip-humanize').is(':checked');
+            var seoOnly = $('#waisg-batch-seo-only').is(':checked');
+            var phaseHint = seoOnly ? '仅SEO' : (skipHumanize ? '跳过润色' : '优化+润色');
+            updateProgress(pct, '已完成 ' + doneOverall + ' / ' + totalCount + '（✅ ' + successCount + '　❌ ' + failCount + ' ' + phaseHint + '）');
+            addLog('🏁 本轮完成。本轮处理 ' + doneN + ' 篇，成功 ' + successCount + ' 篇' + (failCount ? '，失败 ' + failCount + ' 篇' : '') + (baseDone ? '（断点续跑，此前已完成 ' + baseDone + ' 篇）' : '') + '。', 'success');
             clearBatchState(); // 任务完成，清除 localStorage
             return;
         }
 
-        var postId = queue.shift();
+        // 已停止：不再投递新任务，等正在飞的请求收尾
+        if (stopped) return;
+
+        // 并发池调度：把空闲槽位填满
+        while (inFlight < concurrency && queue.length > 0) {
+            var postId = queue.shift();
+            inFlight++;
+            runOne(postId);
+        }
+    }
+
+    /**
+     * 处理单篇（独立的并发 worker）
+     * 完成后自身负责把空槽还给调度器，并按 interval 延迟后再触发 processNext 投递下一篇
+     */
+    function runOne(postId) {
         var skipHumanize = $('#waisg-batch-skip-humanize').is(':checked');
         var seoOnly = $('#waisg-batch-seo-only').is(':checked');
         var phaseHint = seoOnly ? '仅SEO' : (skipHumanize ? '优化中（跳过润色）' : '优化+润色');
         setRowStatus(postId, phaseHint + '...', 'processing');
         updateProgress(
             Math.round((doneCount / totalCount) * 100),
-            '正在处理 ID:' + postId + '（' + (doneCount + 1) + '/' + totalCount + '）— ' + phaseHint
+            '已完成 ' + doneCount + ' / ' + totalCount + '（并发 ' + inFlight + '/' + concurrency + '，' + phaseHint + '）'
         );
 
-        // 自动翻页到正在处理的行
-        var $row = $('#waisg-batch-row-' + postId);
-        if ($row.length) {
-            var rowPage = parseInt($row.attr('data-page'), 10);
-            if (rowPage !== currentPage) showPage(rowPage);
+        // 自动翻页到正在处理的行（仅当只有一路并发时翻页，多路并发避免来回跳）
+        if (concurrency === 1) {
+            var $row = $('#waisg-batch-row-' + postId);
+            if ($row.length) {
+                var rowPage = parseInt($row.attr('data-page'), 10);
+                if (rowPage !== currentPage) showPage(rowPage);
+            }
         }
 
-        $.post(ajaxurl, {
-            action:         'waisg_batch_optimize_one',
-            nonce:          nonce,
-            post_id:        postId,
-            template_id:    parseInt($('#waisg-batch-template').val(), 10) || 0,
-            seo_only:       $('#waisg-batch-seo-only').is(':checked') ? 1 : 0,
-            skip_humanize:  $('#waisg-batch-skip-humanize').is(':checked') ? 1 : 0,
-            auto_fix_seo:   $('#waisg-batch-auto-fix-seo').is(':checked') ? 1 : 0,
-            model_override: $('#waisg-batch-model-override').val() || '',
-        }, function (res) {
-            doneCount++;
-            saveBatchState(); // 每完成一篇，更新 localStorage
-            if (res.success) {
-                var d = res.data;
-                setRowStatus(postId, '✅ 待确认', 'success');
-                addLog('✅ [' + postId + '] ' + $('<div>').text(d.title).html() + ' — 优化完成，等待确认');
-                // 更新标题单元格为优化后标题
-                var $titleCell = $('#waisg-batch-row-' + postId).find('td:nth-child(3)');
-                $titleCell.html($('<span>').text(d.title));
-                // 渲染操作按钮 + 插入详情行
-                renderOptimizeResult(postId, d);
-                // 更新主行 SEO 评分（紧凑版）
-                renderRowScore(postId, d.optimized);
-                // 记录到成功列表
-                if (successIds.indexOf(postId) < 0) successIds.push(postId);
-                // 如果之前在失败列表中，移除
-                var fi = failedIds.indexOf(postId);
-                if (fi >= 0) failedIds.splice(fi, 1);
-                $('#waisg-batch-action-bar').show();
-            } else {
-                setRowStatus(postId, '❌ 失败', 'error');
-                addLog('❌ [' + postId + '] ' + (res.data && res.data.message), 'error');
-                // 记录失败
-                if (failedIds.indexOf(postId) < 0) failedIds.push(postId);
-            }
-
-            updateProgress(Math.round((doneCount / totalCount) * 100));
-
+        // timeout 兜底：PHP 端最高 600s，前端给 660s；超时强制触发 fail，
+        // 避免 AI 请求挂死导致 inFlight 永不归零、进度卡死。
+        var settled = false; // 防止 success/fail 与 complete 重复结算
+        function settle() {
+            if (settled) return;
+            settled = true;
+            inFlight--;
+            updateProgress(
+                Math.round((doneCount / totalCount) * 100),
+                '已完成 ' + doneCount + ' / ' + totalCount + '（并发 ' + inFlight + '/' + concurrency + '）'
+            );
             if (!stopped && queue.length) {
                 setTimeout(processNext, interval);
             } else {
                 processNext();
             }
-        }).fail(function () {
-            doneCount++;
-            setRowStatus(postId, '❌ 请求失败', 'error');
-            addLog('❌ [' + postId + '] 请求失败（网络或超时）', 'error');
-            if (failedIds.indexOf(postId) < 0) failedIds.push(postId);
-            updateProgress(Math.round((doneCount / totalCount) * 100));
-            if (!stopped && queue.length) { setTimeout(processNext, interval); } else { processNext(); }
+        }
+
+        $.ajax({
+            url:  ajaxurl,
+            type: 'POST',
+            timeout: 660000, // 660 秒，兜底 PHP 端最高 600s + 余量
+            data: {
+                action:         'waisg_batch_optimize_one',
+                nonce:          nonce,
+                post_id:        postId,
+                template_id:    parseInt($('#waisg-batch-template').val(), 10) || 0,
+                seo_only:       $('#waisg-batch-seo-only').is(':checked') ? 1 : 0,
+                skip_humanize:  $('#waisg-batch-skip-humanize').is(':checked') ? 1 : 0,
+                auto_fix_seo:   $('#waisg-batch-auto-fix-seo').is(':checked') ? 1 : 0,
+                model_override: $('#waisg-batch-model-override').val() || '',
+            },
+        }).done(function (res) {
+            try {
+                doneCount++;
+                saveBatchState(); // 每完成一篇，更新 localStorage
+                if (res.success) {
+                    var d = res.data;
+                    setRowStatus(postId, d.skipped ? '✅ 已达标（跳过）' : '✅ 待确认', 'success');
+                    if (d.skipped) {
+                        addLog('⏭️ [' + postId + '] ' + $('<div>').text(d.title).html() + ' — ' + (d.message || 'SEO 字段已达标，已跳过 AI（零消耗）'), 'success');
+                    } else {
+                        addLog('✅ [' + postId + '] ' + $('<div>').text(d.title).html() + ' — 优化完成，等待确认');
+                    }
+                    // 更新标题单元格为优化后标题
+                    var $titleCell = $('#waisg-batch-row-' + postId).find('td:nth-child(3)');
+                    $titleCell.html($('<span>').text(d.title));
+                    // 渲染操作按钮 + 插入详情行
+                    renderOptimizeResult(postId, d);
+                    // 更新主行 SEO 评分（紧凑版）
+                    renderRowScore(postId, d.optimized);
+                    // 记录到成功列表（会话级，用于"跳过已优化"过滤）+ 本轮成功计数
+                    if (successIds.indexOf(postId) < 0) { successIds.push(postId); roundSuccess++; }
+                    // 如果之前在失败列表中，移除
+                    var fi = failedIds.indexOf(postId);
+                    if (fi >= 0) failedIds.splice(fi, 1);
+                    $('#waisg-batch-action-bar').show();
+                } else {
+                    setRowStatus(postId, '❌ 失败', 'error');
+                    addLog('❌ [' + postId + '] ' + (res.data && res.data.message), 'error');
+                    // 记录失败
+                    if (failedIds.indexOf(postId) < 0) failedIds.push(postId);
+                }
+            } catch (e) {
+                // 渲染结果时出错不能阻塞并发池调度，降级记为失败
+                addLog('⚠️ [' + postId + '] 渲染结果时出错：' + (e && e.message ? e.message : e), 'warn');
+                // 若已计入成功列表（push 之后渲染才抛异常），先移除再记失败，保证一篇只计一次
+                var si = successIds.indexOf(postId);
+                if (si >= 0) { successIds.splice(si, 1); roundSuccess--; }
+                if (failedIds.indexOf(postId) < 0) failedIds.push(postId);
+            } finally {
+                settle();
+            }
+        }).fail(function (jqXHR, textStatus) {
+            try {
+                doneCount++;
+                saveBatchState(); // 与 .done 路径一致，保证断点恢复时"已完成"数不漂移
+                var reason = (textStatus === 'timeout') ? '请求超时（前端 660s 兜底）' : '请求失败（网络或超时）';
+                setRowStatus(postId, '❌ ' + (textStatus === 'timeout' ? '超时' : '请求失败'), 'error');
+                addLog('❌ [' + postId + '] ' + reason, 'error');
+                if (failedIds.indexOf(postId) < 0) failedIds.push(postId);
+            } finally {
+                settle();
+            }
         });
     }
 
@@ -330,6 +405,7 @@
             var opt  = d.optimized || {};
 
             var statusOptions = '<option value="draft">草稿</option>'
+                + '<option value="pending">保持待审</option>'
                 + '<option value="publish">立即发布</option>'
                 + '<option value="future">定时发布</option>';
 
@@ -360,7 +436,7 @@
                 + editField('应用为',
                     '<select class="bd-status">' + statusOptions + '</select>'
                     + '<input type="datetime-local" class="bd-date" style="display:none;margin:0 6px;" />'
-                    + '<button type="button" class="bd-apply button button-primary" data-history-id="' + d.history_id + '" data-post-id="' + postId + '" style="margin-left:6px;">应用到文章</button>'
+                    + '<button type="button" class="bd-apply button button-primary" data-history-id="' + esc(d.history_id) + '" data-post-id="' + postId + '" style="margin-left:6px;">应用到文章</button>'
                     + '<span class="bd-msg" style="font-size:12px;margin-left:8px;display:none;"></span>'
                 )
                 + '</table>'
@@ -388,7 +464,18 @@
     }
 
     function esc(str) {
-        return $('<div>').text(String(str || '')).html();
+        // 转义 & < > " 四个字符，确保在属性上下文（value="..."）也安全
+        return $('<div>').text(String(str || '')).html().replace(/"/g, '&quot;');
+    }
+
+    // 仅允许 http(s) 协议的 URL，防止 javascript: 等协议注入
+    function safeUrl(u) {
+        var s = String(u || '');
+        return /^https?:\/\//i.test(s) ? s : '';
+    }
+
+    function escHtml(s) {
+        return $('<div>').text(String(s == null ? '' : s)).html();
     }
 
     // =========================================================
@@ -428,7 +515,7 @@
         var tl  = (title || '').length;
         var stl = (seoT  || '').length;
         var sdl = (seoD  || '').length;
-        var kwLc = ((kw || '').split(',')[0] || '').trim().toLowerCase();
+        var kwLc = ((kw || '').replace(/[，、；;｜|]/g, ',').split(',')[0] || '').trim().toLowerCase();
 
         function grade(len, g1, g2, y1, y2) {
             if (len === 0) return 'gray';
@@ -470,7 +557,7 @@
         var tl  = (title || '').length;
         var stl = (seoT  || '').length;
         var sdl = (seoD  || '').length;
-        var kwLc = ((kw || '').split(',')[0] || '').trim().toLowerCase();
+        var kwLc = ((kw || '').replace(/[，、；;｜|]/g, ',').split(',')[0] || '').trim().toLowerCase();
 
         function grade(len, g1, g2, y1, y2) {
             if (len === 0) return 'gray';
@@ -569,12 +656,15 @@
             $detail.find('.bd-apply').prop('disabled', false).text('应用到文章');
             if (res.success) {
                 var d = res.data;
-                var labels = { draft: '草稿', publish: '已发布', future: '已定时' };
-                $msg.html('✅ ' + (labels[d.status] || d.status)
-                    + ' &nbsp;<a href="' + d.edit_url + '" target="_blank">编辑文章</a>'
+                var labels = { draft: '草稿', pending: '待审', publish: '已发布', future: '已定时' };
+                // status 经 esc 防注入（虽是 enum，防御性兜底）；edit_url 校验协议白名单
+                var statusLabel = esc(labels[d.status] || d.status);
+                $msg.html('✅ ' + statusLabel
+                    + ' &nbsp;<a href="' + esc(safeUrl(d.edit_url)) + '" target="_blank">编辑文章</a>'
                 ).css('color', '#0a6').show();
                 setRowStatus(postId, '✅ 已应用', 'success');
-                $('#waisg-batch-row-' + postId + ' .waisg-batch-check').prop('disabled', true).prop('checked', false);
+                // 不禁用勾选框，允许再次勾选应用（后端已支持 applied 记录重复应用）
+                $('#waisg-batch-row-' + postId + ' .waisg-batch-check').prop('checked', false);
             } else {
                 $msg.text('❌ ' + (res.data && res.data.message ? res.data.message : '应用失败')).css('color', '#c00').show();
             }
@@ -637,7 +727,8 @@
                 if (res.success) {
                     done++;
                     setRowStatus(item.postId, '✅ 已应用', 'success');
-                    $('#waisg-batch-row-' + item.postId + ' .waisg-batch-check').prop('disabled', true).prop('checked', false);
+                    // 不禁用勾选框，允许再次勾选应用（后端已支持 applied 记录重复应用）
+                    $('#waisg-batch-row-' + item.postId + ' .waisg-batch-check').prop('checked', false);
                 } else { fail++; }
                 applyOne();
             }).fail(function () { fail++; applyOne(); });
@@ -663,7 +754,9 @@
     function addLog(msg, type) {
         var color = type === 'error' ? '#c00' : (type === 'success' ? '#0a6' : (type === 'warn' ? '#996' : '#333'));
         var $log = $('#waisg-batch-log');
-        $log.append('<div style="color:' + color + ';">[' + new Date().toLocaleTimeString() + '] ' + msg + '</div>');
+        // 转义 msg 防止后端返回的 AI 原始文本/标题/错误信息触发 XSS
+        var safeMsg = $('<div>').text(String(msg == null ? '' : msg)).html();
+        $log.append('<div style="color:' + color + ';">[' + new Date().toLocaleTimeString() + '] ' + safeMsg + '</div>');
         $log.scrollTop($log[0].scrollHeight);
     }
 
@@ -711,6 +804,10 @@
                 allPosts   = ids.map(function (id) { return { id: id, title: 'ID: ' + id }; });
                 doneCount  = saved.done;
                 totalCount = saved.total;
+                // 断点续跑：本轮统计只算本次会话，收尾时加 baseDone 才是整体进度
+                baseDone     = saved.done;
+                roundSuccess = 0;
+                failedIds    = [];
                 queue      = saved.remaining.slice();
                 if (saved.seo_only) $('#waisg-batch-seo-only').prop('checked', true);
                 currentPage = 1;
@@ -722,6 +819,7 @@
                 $('#waisg-batch-list-wrap').show();
                 processing = true;
                 stopped    = false;
+                inFlight   = 0;
                 $('#waisg-batch-progress-wrap').show();
                 $('#waisg-batch-action-bar').hide();
                 $('#waisg-batch-start').hide();

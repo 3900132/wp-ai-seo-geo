@@ -33,13 +33,12 @@ class WAISG_Post_List {
 
 		if ( $ai_generated ) {
 			// AI 直接生成：显示 AI 生成徽标
-			echo '<span style="display:inline-block;background:#0073aa;color:#fff;font-size:11px;font-weight:700;'
-				. 'padding:2px 7px;border-radius:3px;">AI 生成</span>';
+			echo '<span class="waisg-list-badge waisg-list-badge-gen">AI 生成</span>';
 		} elseif ( $count > 0 ) {
 			// 普通文章被 AI 优化过：只显示优化次数，不显示徽标
-			echo '<span style="font-weight:600;color:#2271b1;">' . $count . ' 次优化</span>';
+			echo '<span class="waisg-list-opt-count">' . $count . ' 次优化</span>';
 		} else {
-			echo '<span style="color:#ccc;">—</span>';
+			echo '<span class="waisg-list-empty">—</span>';
 		}
 	}
 

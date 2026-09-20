@@ -46,3 +46,7 @@ foreach ( $meta_keys as $key ) {
 
 // ── 4. 清除遗留的 WP-Cron 定时任务 ──────────────────────────────────
 wp_clear_scheduled_hook( 'waisg_auto_optimize' );
+
+// 说明：update_reasoning_model v1.9.3 起改用 wp_options CAS 写入，不再使用 transient 锁，
+// 无遗留 transient 需清理。旧版（v1.9.1~v1.9.2）的 waisg_reasoning_lock transient 由
+// WordPress 自身按过期时间清理，无需在此手动处理。

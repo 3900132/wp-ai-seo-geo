@@ -77,14 +77,17 @@ class WAISG_Meta_Box {
 		$count = (int) get_post_meta( $post_id, '_waisg_opt_count', true );
 		update_post_meta( $post_id, '_waisg_opt_count', $count + 1 );
 
-		// 保存 SEO 字段（只保存用户明确配置的字段）
-		$seo_title = sanitize_text_field( wp_unslash( $_POST['waisg_seo_title'] ?? '' ) );
-		$seo_desc  = sanitize_textarea_field( wp_unslash( $_POST['waisg_seo_desc']  ?? '' ) );
-		$seo_kw    = sanitize_text_field( wp_unslash( $_POST['waisg_seo_kw']    ?? '' ) );
-
+		// 保存 SEO 字段：优先用用户明确配置的字段名，未配置时回退自动检测
 		$title_key = WAISG_Settings::get( 'seo_title_field' );
 		$desc_key  = WAISG_Settings::get( 'seo_description_field' );
 		$kw_key    = WAISG_Settings::get( 'seo_keywords_field' );
+		if ( empty( $title_key ) ) $title_key = $this->get_seo_field_name( 'title' );
+		if ( empty( $desc_key ) )  $desc_key  = $this->get_seo_field_name( 'description' );
+		if ( empty( $kw_key ) )    $kw_key    = $this->get_seo_field_name( 'keywords' );
+
+		$seo_title = sanitize_text_field( wp_unslash( $_POST['waisg_seo_title'] ?? '' ) );
+		$seo_desc  = sanitize_textarea_field( wp_unslash( $_POST['waisg_seo_desc']  ?? '' ) );
+		$seo_kw    = sanitize_text_field( wp_unslash( $_POST['waisg_seo_kw']    ?? '' ) );
 
 		if ( ! empty( $title_key ) && $seo_title !== '' ) update_post_meta( $post_id, $title_key, $seo_title );
 		if ( ! empty( $desc_key )  && $seo_desc  !== '' ) update_post_meta( $post_id, $desc_key,  $seo_desc );
@@ -92,6 +95,15 @@ class WAISG_Meta_Box {
 
 		// 清除待保存标记
 		delete_post_meta( $post_id, '_waisg_ai_pending' );
+	}
+
+	/**
+	 * 增加文章优化次数（Gutenberg/REST 路径专用，因 $_POST 不含 nonce 不走 on_save_post）
+	 */
+	public static function increment_opt_count( $post_id ) {
+		if ( ! $post_id ) return;
+		$count = (int) get_post_meta( $post_id, '_waisg_opt_count', true );
+		update_post_meta( $post_id, '_waisg_opt_count', $count + 1 );
 	}
 
 	/** 注册元框 */
@@ -209,23 +221,31 @@ class WAISG_Meta_Box {
 		<input type="hidden" id="waisg-seo-kw-h"    name="waisg_seo_kw"      value="<?php echo esc_attr( $seo_kw ); ?>" />
 
 		<?php $tpl_list = WAISG_Settings::get_templates(); if ( ! empty( $tpl_list ) ) : ?>
-		<div style="margin-bottom:8px;padding:6px 0;border-bottom:1px solid #f0f0f1;">
-			<label for="waisg-opt-template" style="font-size:13px;margin-right:6px;">📐 内容结构模板：</label>
+		<div class="waisg-setting-row">
+			<label for="waisg-opt-template">📐 内容结构模板：</label>
 			<select id="waisg-opt-template" style="max-width:240px;">
 				<option value="0">— 不使用模板（AI 自由发挥）—</option>
 				<?php foreach ( $tpl_list as $tpl ) : ?>
 				<option value="<?php echo absint( $tpl['id'] ); ?>"><?php echo esc_html( $tpl['name'] ); ?></option>
 				<?php endforeach; ?>
 			</select>
-			<a href="<?php echo esc_url( admin_url( 'admin.php?page=waisg-settings' ) ); ?>#waisg-templates-card" target="_blank" style="margin-left:8px;font-size:12px;">管理模板</a>
+			<a href="<?php echo esc_url( admin_url( 'admin.php?page=waisg-settings' ) ); ?>#waisg-templates-card" target="_blank" class="waisg-tpl-manage">管理模板</a>
 		</div>
 		<?php endif; ?>
 
 			<!-- 使用模型（生成 + 优化共用，与右侧边栏联动同步） -->
-			<div style="margin-bottom:8px;padding:6px 0;border-bottom:1px solid #f0f0f1;">
-				<label for="waisg-model-override" style="font-size:13px;margin-right:6px;">🧠 使用模型：</label>
+			<div class="waisg-setting-row">
+				<label for="waisg-model-override">🧠 使用模型：</label>
 				<?php echo $this->model_select_html( 'waisg-model-override' ); ?>
-				<span style="font-size:12px;color:#646970;margin-left:6px;">本页「生成 / 优化 / 仅SEO / 单字段」均使用此模型</span>
+				<span class="waisg-inline-hint">本页「生成 / 优化 / 仅SEO / 单字段」均使用此模型</span>
+				<?php $mb_humanize_on = (int) WAISG_Settings::get( 'humanize_enabled', 0 ); ?>
+				<label class="waisg-skip-label<?php echo $mb_humanize_on ? '' : ' is-disabled'; ?>" title="仅在全局开启「降低 AI 痕迹」时生效">
+					<input type="checkbox" id="waisg-skip-humanize" value="1" <?php disabled( $mb_humanize_on, 0 ); ?> />
+					跳过二次润色
+				</label>
+				<span class="waisg-inline-hint">
+					<?php echo $mb_humanize_on ? '勾选可省 1-3 次 API 调用（正文优化时）' : '（未开启「降低 AI 痕迹」，已自动禁用）'; ?>
+				</span>
 			</div>
 
 			<!-- 生成文章 区域 -->
@@ -312,7 +332,7 @@ class WAISG_Meta_Box {
 				<!-- SEO 评分面板 -->
 				<div id="waisg-seo-score" class="waisg-seo-score" style="display:none;margin-top:8px;">
 					<span class="waisg-score-label">SEO 评分：</span>
-					<span class="waisg-score-total" id="waisg-score-total">0</span><span style="color:#646970;"> / 100</span>
+					<span class="waisg-score-total" id="waisg-score-total">0</span><span class="waisg-score-suffix"> / 100</span>
 					&nbsp;
 					<span class="waisg-score-items">
 						<span class="waisg-score-item waisg-score-gray" id="waisg-score-title-len"  data-field="title"           title="标题长度（建议 20-60 字符）— 点击可让 AI 重新优化">标题</span>
@@ -321,7 +341,7 @@ class WAISG_Meta_Box {
 						<span class="waisg-score-item waisg-score-gray" id="waisg-score-kw-in-t"    data-field="title"           title="关键词是否出现在文章标题中 — 点击可让 AI 重新优化">关键词↑标题</span>
 						<span class="waisg-score-item waisg-score-gray" id="waisg-score-kw-in-d"    data-field="seo_description" title="关键词是否出现在SEO描述中 — 点击可让 AI 重新优化">关键词↑描述</span>
 					</span>
-					<div style="font-size:12px; color:#666; margin-top:6px; line-height:1.5;">
+					<div class="waisg-score-hint">
 						💡 <strong>绿色</strong>=可接受，<strong>黄色</strong>=需要改进，<strong>红色</strong>=建议优化。点击任意指示灯，AI 会重新优化该字段。
 					</div>
 				</div>
@@ -331,14 +351,14 @@ class WAISG_Meta_Box {
 			<div id="waisg-status" class="waisg-status" style="display:none;"></div>
 
 			<!-- 暂存到待处理提示条 -->
-			<div id="waisg-staging-bar" style="display:none;padding:6px 0;font-size:13px;color:#1d2327;">
+			<div id="waisg-staging-bar" style="display:none;">
 				优化完成，是否要暂存到「待处理」？可在「优化历史」中稍后审阅。
-				<button type="button" id="waisg-btn-stage" class="button button-small" style="margin-left:8px;">📥 暂存到待处理</button>
-				<button type="button" id="waisg-btn-dismiss-stage" class="button-link" style="margin-left:8px;color:#646970;">关闭</button>
+				<button type="button" id="waisg-btn-stage" class="button button-small">📥 暂存到待处理</button>
+				<button type="button" id="waisg-btn-dismiss-stage" class="button-link">关闭</button>
 			</div>
 
 			<!-- 内链建议 -->
-			<div id="waisg-link-suggestions" style="display:none;margin-top:4px;"></div>
+			<div id="waisg-link-suggestions" style="display:none;"></div>
 
 			<!-- 优化次数 -->
 			<div class="waisg-stats">
@@ -400,21 +420,30 @@ class WAISG_Meta_Box {
 
 		$model_override = sanitize_key( $_POST['model_override'] ?? '' );
 		$prompts = WAISG_AI_API::build_generate_prompt( $topic, $keywords, $length, '', 'zh-CN', $template );
-		$extra   = array();
+		// 按目标字数动态调整 max_tokens 和 timeout（与 AI 文章生成页一致），
+		// 避免长文被基本设置的固定 max_tokens 截断；length=0 时不限制则用默认值
+		$extra   = $length > 0 ? WAISG_AI_API::build_long_content_extra( str_repeat( '中', $length ) ) : array();
 		$this->apply_model_override( $extra, $model_override );
 		$result  = WAISG_AI_API::call_prompts( $prompts, $extra );
 
 		if ( is_wp_error( $result ) ) {
 			WAISG_Logger::log( 0, 'generate', $result->get_error_message() );
-			wp_send_json_error( array( 'message' => $result->get_error_message() ) );
+			wp_send_json_error( array( 'message' => wp_strip_all_tags( $result->get_error_message() ) ) );
 		}
 
 		$text = $result['text'];
-		$data = WAISG_AI_API::parse_json_response( $text );
+		$data = WAISG_AI_API::parse_json_response( $text, 'generate', 0 );
 		if ( ! $data ) {
-			WAISG_Logger::log( 0, 'generate', 'AI 返回格式异常（无法解析 JSON）' );
-			wp_send_json_error( array( 'message' => 'AI 返回格式异常，请重试。原始内容：' . mb_substr( $text, 0, 200 ) ) );
+			WAISG_Logger::log( 0, 'generate', 'AI 返回格式异常（无法解析 JSON）', 'AI返回：' . mb_substr( $text, 0, 300, 'UTF-8' ) );
+			wp_send_json_error( array( 'message' => 'AI 返回格式异常，请重试。原始内容：' . wp_strip_all_tags( mb_substr( $text, 0, 200 ) ) ) );
 		}
+
+		// 降低 AI 痕迹：AI 生成的文章也应走 humanize（如全局开启且未勾选跳过），与优化路径一致
+		$skip_humanize = ! empty( $_POST['skip_humanize'] );
+		if ( ! $skip_humanize && WAISG_Settings::get( 'humanize_enabled', 0 ) ) {
+			$data['content'] = WAISG_AI_API::humanize( $data['content'], $model_override );
+		}
+		$data['content'] = WAISG_AI_API::filter_ai_phrases( $data['content'] );
 
 		wp_send_json_success( array(
 			'title'           => $data['title']           ?? '',
@@ -423,6 +452,7 @@ class WAISG_Meta_Box {
 			'seo_title'       => $data['seo_title']       ?? '',
 			'seo_description' => $data['seo_description'] ?? '',
 			'seo_keywords'    => $data['seo_keywords']    ?? '',
+			'recovered'       => $data['_recovered']      ?? '',
 		) );
 	}
 
@@ -451,17 +481,18 @@ class WAISG_Meta_Box {
 
 		$prompts = WAISG_AI_API::build_optimize_all_prompt( $vars, $template );
 		$extra   = WAISG_AI_API::build_long_content_extra( $vars['content'] );
-		$this->apply_model_override( $extra, sanitize_key( $_POST['model_override'] ?? '' ) );
+		$opt_model_override = sanitize_key( $_POST['model_override'] ?? '' );
+		$this->apply_model_override( $extra, $opt_model_override );
 		$result  = WAISG_AI_API::call_prompts( $prompts, $extra );
 
 		if ( is_wp_error( $result ) ) {
 			WAISG_Logger::log( $post_id, 'optimize_all', $result->get_error_message() );
-			wp_send_json_error( array( 'message' => $result->get_error_message() ) );
+			wp_send_json_error( array( 'message' => wp_strip_all_tags( $result->get_error_message() ) ) );
 		}
 
-		$data = WAISG_AI_API::parse_json_response( $result['text'] );
+		$data = WAISG_AI_API::parse_json_response( $result['text'], 'optimize_all', $post_id );
 		if ( ! $data ) {
-			WAISG_Logger::log( $post_id, 'optimize_all', 'AI 返回格式异常（无法解析 JSON）' );
+			WAISG_Logger::log( $post_id, 'optimize_all', 'AI 返回格式异常（无法解析 JSON）', 'AI返回：' . mb_substr( $result['text'], 0, 300, 'UTF-8' ) );
 			wp_send_json_error( array( 'message' => 'AI 返回格式异常，请重试。' ) );
 		}
 
@@ -470,10 +501,11 @@ class WAISG_Meta_Box {
 			$data['content'] = WAISG_AI_API::restore_images( $data['content'], $img_protected['map'] );
 		}
 
-		// 降低 AI 痕迹：先 humanize（如开启），再外层兜底 filter
+		// 降低 AI 痕迹：先 humanize（如开启且未勾选跳过），再外层兜底 filter
 		if ( ! empty( $data['content'] ) ) {
-			if ( WAISG_Settings::get( 'humanize_enabled', 0 ) ) {
-				$data['content'] = WAISG_AI_API::humanize( $data['content'] );
+			$skip_humanize = ! empty( $_POST['skip_humanize'] );
+			if ( ! $skip_humanize && WAISG_Settings::get( 'humanize_enabled', 0 ) ) {
+				$data['content'] = WAISG_AI_API::humanize( $data['content'], $opt_model_override );
 			}
 			$data['content'] = WAISG_AI_API::filter_ai_phrases( $data['content'] );
 		}
@@ -500,6 +532,7 @@ class WAISG_Meta_Box {
 			'seo_title'       => $data['seo_title']       ?? '',
 			'seo_description' => $data['seo_description'] ?? '',
 			'seo_keywords'    => $data['seo_keywords']    ?? '',
+			'recovered'       => $data['_recovered']      ?? '',
 		) );
 	}
 
@@ -524,19 +557,21 @@ class WAISG_Meta_Box {
 		$prompts = WAISG_AI_API::build_optimize_seo_only_prompt( $vars, $template );
 
 		// 按用户选择的模型（默认轻量，未配置则主模型）
-		$extra = array( 'max_tokens' => 1024 );
+		// 使用用户在基本设置里配置的 max_tokens（推理模型的思考 token 也计入此配额，
+		// 不能写死 1024，否则推理模型思考没结束就被截断）
+		$extra = array( 'max_tokens' => absint( WAISG_Settings::get( 'max_tokens', 4096 ) ) );
 		$this->apply_model_override( $extra, sanitize_key( $_POST['model_override'] ?? '' ) );
 
 		$result = WAISG_AI_API::call_prompts( $prompts, $extra );
 
 		if ( is_wp_error( $result ) ) {
 			WAISG_Logger::log( $post_id, 'optimize_seo_only', $result->get_error_message() );
-			wp_send_json_error( array( 'message' => $result->get_error_message() ) );
+			wp_send_json_error( array( 'message' => wp_strip_all_tags( $result->get_error_message() ) ) );
 		}
 
-		$data = WAISG_AI_API::parse_json_response( $result['text'] );
+		$data = WAISG_AI_API::parse_json_response( $result['text'], 'optimize_seo_only', $post_id );
 		if ( ! $data ) {
-			WAISG_Logger::log( $post_id, 'optimize_seo_only', 'AI 返回格式异常（无法解析 JSON）' );
+			WAISG_Logger::log( $post_id, 'optimize_seo_only', 'AI 返回格式异常（无法解析 JSON）', 'AI返回：' . mb_substr( $result['text'], 0, 300, 'UTF-8' ) );
 			wp_send_json_error( array( 'message' => 'AI 返回格式异常，请重试。' ) );
 		}
 
@@ -561,6 +596,7 @@ class WAISG_Meta_Box {
 			'seo_title'       => $data['seo_title']       ?? '',
 			'seo_description' => $data['seo_description'] ?? '',
 			'seo_keywords'    => $data['seo_keywords']    ?? '',
+			'recovered'       => $data['_recovered']      ?? '',
 		) );
 	}
 
@@ -595,12 +631,26 @@ class WAISG_Meta_Box {
 			'seo_keywords'    => 'seo_kw',
 		);
 		$var_key = $field_var_map[ $field ];
-		$vars[ $var_key ] = sanitize_textarea_field( wp_unslash( $_POST['current_value'] ?? $vars[ $var_key ] ) );
+		// content 字段保留 HTML（图片/标签/iframe 等），用零过滤的 sanitize_content；
+		// 其余短字段（title/excerpt/seo_*）用 sanitize_textarea_field 剥标签。
+		// 旧版对所有字段统一用 sanitize_textarea_field，会把正文 <figure><img> 剥光，
+		// 导致后续 protect_images 无图可护、restore_images 兜底补图失效（图片丢失 bug）。
+		$vars[ $var_key ] = ( $field === 'content' )
+			? WAISG_AI_API::sanitize_content( wp_unslash( $_POST['current_value'] ?? $vars[ $var_key ] ) )
+			: sanitize_textarea_field( wp_unslash( $_POST['current_value'] ?? $vars[ $var_key ] ) );
 
-		// 快速预检：如果字段长度已合格且关键词已存在，提示用户无需再调用AI
-		$skip_reason = $this->quick_seo_check( $field, $vars );
-		if ( $skip_reason === true ) {
-			wp_send_json_error( array( 'message' => '该字段当前已达标（长度合格、关键词已包含），无需再次消耗 Token 优化。如仍需改进表达，请手动编辑。' ) );
+		// 快速预检：字段长度已合格且关键词已存在时，不直接阻断——改为返回确认提示，
+		// 让用户决定是否仍要消耗 Token 重新优化（用户可能有润色表达等需求）。
+		// force=1 时跳过预检，直接执行优化。
+		$force = ! empty( $_POST['force'] );
+		if ( ! $force ) {
+			$skip_reason = $this->quick_seo_check( $field, $vars );
+			if ( $skip_reason === true ) {
+				wp_send_json_success( array(
+					'need_confirm' => true,
+					'message'      => '该字段当前已达标（长度合格、关键词已包含）。确定要再次消耗 Token 优化吗？',
+				) );
+			}
 		}
 
 		// 正文字段：保护图片，防止 AI 优化时丢失
@@ -617,29 +667,43 @@ class WAISG_Meta_Box {
 		if ( $field === 'content' ) {
 			$extra = WAISG_AI_API::build_long_content_extra( $vars['content'] );
 		}
-		$this->apply_model_override( $extra, sanitize_key( $_POST['model_override'] ?? '' ) );
+		$single_model_override = sanitize_key( $_POST['model_override'] ?? '' );
+		$this->apply_model_override( $extra, $single_model_override );
 
 		$result = WAISG_AI_API::call_prompts( $prompts, $extra );
 
 		if ( is_wp_error( $result ) ) {
 			WAISG_Logger::log( $post_id, 'optimize_single', $result->get_error_message() );
-			wp_send_json_error( array( 'message' => $result->get_error_message() ) );
+			wp_send_json_error( array( 'message' => wp_strip_all_tags( $result->get_error_message() ) ) );
 		}
 
-		$value = $result['text'];
+		// 单字段优化（非 content 字段）：尝试解析 JSON 响应
+		if ( $field !== 'content' ) {
+			$data = WAISG_AI_API::parse_json_response( $result['text'], 'optimize_single', $post_id );
+			if ( $data && is_array( $data ) && isset( $data[ $field ] ) ) {
+				$value = $data[ $field ];
+			} else {
+				// 解析失败或字段不匹配，回退为纯文本
+				$value = $result['text'];
+			}
+		} else {
+			$value = $result['text'];
+		}
 
-		// 正文字段：降低 AI 痕迹（先 humanize 如开启，再外层兜底 filter）
+		// 正文字段：降低 AI 痕迹（先 humanize 如开启且未勾选跳过，再外层兜底 filter）
 		if ( $field === 'content' && ! empty( $value ) ) {
 			$value = WAISG_AI_API::restore_images( $value, $img_protected_single['map'] );
-			if ( WAISG_Settings::get( 'humanize_enabled', 0 ) ) {
-				$value = WAISG_AI_API::humanize( $value );
+			$skip_humanize = ! empty( $_POST['skip_humanize'] );
+			if ( ! $skip_humanize && WAISG_Settings::get( 'humanize_enabled', 0 ) ) {
+				$value = WAISG_AI_API::humanize( $value, $single_model_override );
 			}
 			$value = WAISG_AI_API::filter_ai_phrases( $value );
 		}
 
 		wp_send_json_success( array(
-			'field' => $field,
-			'value' => $value,
+			'field'     => $field,
+			'value'     => $value,
+			'recovered' => isset( $data['_recovered'] ) ? $data['_recovered'] : '',
 		) );
 	}
 
@@ -651,7 +715,8 @@ class WAISG_Meta_Box {
 	 * @return true|string true=已达标可跳过，string=未达标原因
 	 */
 	private function quick_seo_check( $field, $vars ) {
-		$kw = ! empty( $vars['seo_kw'] ) ? trim( explode( ',', $vars['seo_kw'] )[0] ) : '';
+		// 用公共方法归一化分隔符（兼容全角逗号/顿号/分号等），与前端评分面板和 seo_fields_pass() 对齐
+		$kw = ! empty( $vars['seo_kw'] ) ? WAISG_AI_API::first_keyword( $vars['seo_kw'] ) : '';
 		$kw_lc = $kw ? mb_strtolower( $kw, 'UTF-8' ) : '';
 
 		switch ( $field ) {
@@ -737,6 +802,11 @@ class WAISG_Meta_Box {
 				wp_send_json_error( array( 'message' => $message ?: '没有可保存的字段。' ) );
 			}
 
+			// Gutenberg 保存后通过 AJAX 调此接口，on_save_post 不会触发（无 $_POST nonce），
+			// 因此这里手动递增优化次数，确保计数路径不遗漏。
+			// 注：必须在 wp_send_json_success 之前调用，后者会 wp_die() 终止执行。
+			self::increment_opt_count( $post_id );
+
 			wp_send_json_success( array(
 				'message' => $message ?: '所有 SEO 字段已保存。',
 				'data' => array(
@@ -745,9 +815,17 @@ class WAISG_Meta_Box {
 					'kw_key'    => $kw_key,
 				)
 			) );
+		} elseif ( $save_type === 'count' ) {
+			// 增量记录优化次数（Gutenberg 保存后不刷新页面时的替代路径）
+			$count = (int) get_post_meta( $post_id, '_waisg_opt_count', true );
+			update_post_meta( $post_id, '_waisg_opt_count', $count + 1 );
+			wp_send_json_success( array(
+				'message' => '优化次数已记录。',
+				'data'    => array( 'count' => $count + 1 ),
+			) );
+		} else {
+			wp_send_json_error( array( 'message' => '无效操作。' ) );
 		}
-
-		wp_send_json_error( array( 'message' => '无效操作。' ) );
 	}
 
 
@@ -755,7 +833,9 @@ class WAISG_Meta_Box {
 	public function ajax_get_opt_count() {
 		$this->check_permission();
 		$post_id = absint( $_POST['post_id'] ?? 0 );
-		if ( ! $post_id ) wp_send_json_error();
+		if ( ! $post_id || ! current_user_can( 'edit_post', $post_id ) ) {
+			wp_send_json_error( array( 'message' => '无效的文章 ID 或权限不足。' ) );
+		}
 
 		$count = (int) get_post_meta( $post_id, '_waisg_opt_count', true );
 		wp_send_json_success( array( 'count' => $count ) );
@@ -800,9 +880,8 @@ class WAISG_Meta_Box {
 			wp_send_json_success( array( 'links' => array() ) );
 		}
 
-		// 取第一个关键词搜索
-		$parts = explode( ',', $keywords );
-		$kw    = trim( $parts[0] );
+		// 取第一个关键词搜索（归一化分隔符，兼容全角逗号/顿号/分号等）
+		$kw = WAISG_AI_API::first_keyword( $keywords );
 
 		$query = new WP_Query( array(
 			's'              => $kw,
@@ -832,8 +911,15 @@ class WAISG_Meta_Box {
 	/**
 	 * 获取 SEO 字段 meta key
 	 * 优先使用用户自定义配置，否则自动检测已安装的 SEO 插件
+	 *
+	 * 声明为 public static：历史/批量/定时/Schema 等场景仅需读取 SEO 字段 meta key，
+	 * 无需实例化 WAISG_Meta_Box()（实例化会重复注册 11 个 add_action，
+	 * 在 AJAX 上下文里 wp_update_post 后还可能触发多余的 save_post 钩子）。
+	 *
+	 * @param string $type 'title' | 'description' | 'keywords'
+	 * @return string
 	 */
-	public function get_seo_field_name( $type ) {
+	public static function get_seo_field_name( $type ) {
 		$custom = array(
 			'title'       => WAISG_Settings::get( 'seo_title_field' ),
 			'description' => WAISG_Settings::get( 'seo_description_field' ),

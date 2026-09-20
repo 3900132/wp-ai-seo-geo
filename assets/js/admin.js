@@ -17,6 +17,12 @@
         return el ? el.value : '';
     }
 
+    // 读取「跳过二次润色」勾选（勾选=1，否则=0）
+    function getSkipHumanize() {
+        var el = document.getElementById('waisg-skip-humanize');
+        return (el && el.checked) ? 1 : 0;
+    }
+
     // 主元框与侧边栏两个模型下拉联动同步：改其一，另一个跟随
     $(document).on('change', '.waisg-model-override', function () {
         $('.waisg-model-override').val($(this).val());
@@ -31,7 +37,7 @@
         $s.stop(true, true)
           .removeClass('waisg-status-success waisg-status-error waisg-status-loading')
           .addClass('waisg-status-' + (type || 'loading'))
-          .html(msg)
+          .text(msg)   // 用 .text() 而非 .html()，防止后端返回的 AI 原始文本/报错内容触发 XSS
           .show();
         // 不再自动消失，用户操作时再隐藏
     }
@@ -273,7 +279,7 @@
         var title = getTitle();
         var seoT  = $('#waisg-seo-title').val() || '';
         var seoD  = $('#waisg-seo-desc').val()  || '';
-        var kw    = ($('#waisg-seo-kw').val() || '').split(',')[0].trim().toLowerCase();
+        var kw    = ($('#waisg-seo-kw').val() || '').replace(/[，、；;｜|]/g, ',').split(',')[0].trim().toLowerCase();
 
         // 所有字段均为空时隐藏面板（避免新文章显示全灰指示灯）
         if (!title && !seoT && !seoD && !kw) {
@@ -359,11 +365,18 @@
             keywords: keywords
         }, function (res) {
             if (!res.success || !res.data.links || !res.data.links.length) return;
+            // 防御性转义：标题/URL 虽来自站内数据，仍转义防止意外注入
+            function escAttr(s) { return $('<div/>').text(s == null ? '' : String(s)).html().replace(/"/g, '&quot;'); }
+            function escHtml(s) { return $('<div/>').text(s == null ? '' : String(s)).html(); }
+            // 协议白名单：只允许 http/https，防止 javascript: 等协议注入
+            function safeUrl(u) { return /^https?:\/\//i.test(String(u)) ? u : '#'; }
             var html = '<div class="waisg-link-panel"><span class="waisg-link-panel-title">🔗 内链建议：</span>';
             $.each(res.data.links, function (i, lnk) {
-                var aHtml = '<a href="' + lnk.url + '">' + lnk.title + '</a>';
+                var safeUrl = escAttr(safeUrl(lnk.url));
+                var safeTitle = escHtml(lnk.title);
+                var aHtml = '<a href="' + safeUrl + '">' + safeTitle + '</a>';
                 html += '<span class="waisg-link-item">'
-                    + '<a href="' + lnk.url + '" target="_blank">' + lnk.title + '</a> '
+                    + '<a href="' + safeUrl + '" target="_blank">' + safeTitle + '</a> '
                     + '<button type="button" class="button-link waisg-link-copy" data-code="' + aHtml.replace(/"/g, '&quot;') + '">复制</button>'
                     + '</span> ';
             });
@@ -373,7 +386,7 @@
     }
 
     $(document).on('click', '.waisg-link-copy', function () {
-        var code = $(this).attr('data-code').replace(/&quot;/g, '"');
+        var code = $(this).attr('data-code');
         if (navigator.clipboard) {
             navigator.clipboard.writeText(code).then(function () { alert('已复制到剪贴板！'); });
         } else {
@@ -408,6 +421,7 @@
             length:      length,
             template_id: parseInt($('#waisg-opt-template').val(), 10) || 0,
             model_override: getModelOverride(),
+            skip_humanize:  getSkipHumanize(),
         }, function (res) {
             setLoading(false);
             if (!res.success) {
@@ -451,6 +465,7 @@
             post_id:     postId,
             template_id: parseInt($('#waisg-opt-template').val(), 10) || 0,
             model_override: getModelOverride(),
+            skip_humanize:  getSkipHumanize(),
         }, function (res) {
             console.log('✅ 收到服务器响应：', res);
             setLoading(false);
@@ -515,6 +530,16 @@
         var field = $(this).data('field');
         var label = $(this).text();
 
+        doOptimizeSingle(field, label, false);
+    });
+
+    /**
+     * 单字段优化的核心逻辑（普通按钮 + SEO 评分点击 + need_confirm 重试共用）
+     * @param field  字段名
+     * @param label  字段中文名（用于状态提示）
+     * @param force  是否强制优化（跳过达标预检）
+     */
+    function doOptimizeSingle(field, label, force) {
         setLoading(true);
         showStatus('🔧 正在优化【' + label + '】...', 'loading');
 
@@ -529,23 +554,35 @@
             current_seo_desc:    $('#waisg-seo-desc').val(),
             current_seo_kw:      $('#waisg-seo-kw').val(),
             current_value:       getCurrentFieldValue(field),
-            model_override:      getModelOverride()
+            model_override:      getModelOverride(),
+            skip_humanize:       getSkipHumanize(),
+            force:               force ? 1 : 0
         }, function (res) {
             setLoading(false);
             if (!res.success) {
                 showStatus('❌ ' + res.data.message, 'error');
                 return;
             }
+            // 达标确认：后端检测到字段已达标，提示用户是否仍要消耗 Token 重新优化
+            if (res.data.need_confirm) {
+                if (confirm(res.data.message)) {
+                    doOptimizeSingle(field, label, true);
+                }
+                return;
+            }
             applySingleResult(res.data.field, res.data.value);
             syncHiddenFields();
             markAiPending();
             calcSeoScore();
+            // 显示暂存到待处理提示条（与一键优化全部一致，每次优化都可暂存）
+            var stagingBar = document.getElementById('waisg-staging-bar');
+            if (stagingBar) stagingBar.style.display = 'block';
             showStatus('✅ 【' + label + '】已优化，请检查后手动点击「更新」保存。', 'success');
         }).fail(function () {
             setLoading(false);
             showStatus('❌ 请求失败，请重试。', 'error');
         });
-    });
+    }
 
     function getCurrentFieldValue(field) {
         switch (field) {
@@ -693,59 +730,75 @@
             stat.count = 0;
         }
 
-        setLoading(true);
-        showStatus('🔄 正在优化【' + label + '】... ' + (stat.count > 0 ? '（已重试 ' + stat.count + ' 次）' : ''), 'loading');
-        $.post(ajaxurl, {
-            action:            'waisg_optimize_single',
-            nonce:             nonce,
-            post_id:           postId,
-            field:             field,
-            current_title:     getTitle(),
-            current_excerpt:   getExcerpt(),
-            current_seo_title: $('#waisg-seo-title').val(),
-            current_seo_desc:  $('#waisg-seo-desc').val(),
-            current_seo_kw:    $('#waisg-seo-kw').val(),
-            current_value:     getCurrentFieldValue(field),
-            model_override:    getModelOverride(),
-        }, function (res) {
-            setLoading(false);
-            if (!res.success) { showStatus('❌ ' + res.data.message, 'error'); return; }
+        // 优化执行（抽成函数，支持 force 绕过达标预检 + need_confirm 确认）
+        function runScoreOptimize(force) {
+            setLoading(true);
+            showStatus('🔄 正在优化【' + label + '】... ' + (stat.count > 0 ? '（已重试 ' + stat.count + ' 次）' : ''), 'loading');
+            $.post(ajaxurl, {
+                action:            'waisg_optimize_single',
+                nonce:             nonce,
+                post_id:           postId,
+                field:             field,
+                current_title:     getTitle(),
+                current_excerpt:   getExcerpt(),
+                current_seo_title: $('#waisg-seo-title').val(),
+                current_seo_desc:  $('#waisg-seo-desc').val(),
+                current_seo_kw:    $('#waisg-seo-kw').val(),
+                current_value:     getCurrentFieldValue(field),
+                model_override:    getModelOverride(),
+                force:             force ? 1 : 0,
+            }, function (res) {
+                setLoading(false);
+                if (!res.success) { showStatus('❌ ' + res.data.message, 'error'); return; }
 
-            var oldValue = getCurrentFieldValue(field);
-            var newValue = res.data.value;
+                // 达标确认：字段已达标时后端返回 need_confirm，让用户决定是否强制优化
+                if (res.data.need_confirm) {
+                    if (confirm(res.data.message)) {
+                        runScoreOptimize(true);  // 带 force=1 重新请求
+                    }
+                    return;
+                }
 
-            // 内容完全相同则提示用户（节省继续点击的冲动）
-            if (oldValue === newValue) {
-                showStatus('⚠️ 【' + label + '】AI 返回内容与原文一致，未做修改。建议手动调整。', 'error');
-                stat.count++;
-                stat.lastGrade = currentGrade;
+                var oldValue = getCurrentFieldValue(field);
+                var newValue = res.data.value;
+
+                // 内容完全相同则提示用户（节省继续点击的冲动）
+                if (oldValue === newValue) {
+                    showStatus('⚠️ 【' + label + '】AI 返回内容与原文一致，未做修改。建议手动调整。', 'error');
+                    stat.count++;
+                    stat.lastGrade = currentGrade;
+                    waisgRetryStats[field] = stat;
+                    return;
+                }
+
+                applySingleResult(res.data.field, res.data.value);
+                syncHiddenFields();
+                markAiPending();
+                calcSeoScore();
+                // 显示暂存提示条（与一键优化全部一致，单字段优化结果也应可暂存）
+                var stagingBar = document.getElementById('waisg-staging-bar');
+                if (stagingBar) stagingBar.style.display = 'block';
+
+                // 检查评分是否改善（取当前字段对应评分项的等级）
+                var newGrade = waisgGetFieldGrade(field);
+                if (newGrade === currentGrade && currentGrade !== 'green') {
+                    // 未改善：计数 +1
+                    stat.count++;
+                    stat.lastGrade = currentGrade;
+                    showStatus('⚠️ 【' + label + '】已优化但评分仍为 ' + currentGrade + '。可再次点击重试，或手动调整。', 'error');
+                } else {
+                    // 改善了：重置计数
+                    stat.count = 0;
+                    stat.lastGrade = newGrade;
+                    showStatus('✅ 【' + label + '】已优化，请检查后点击「更新」保存。', 'success');
+                }
                 waisgRetryStats[field] = stat;
-                return;
-            }
-
-            applySingleResult(res.data.field, res.data.value);
-            syncHiddenFields();
-            markAiPending();
-            calcSeoScore();
-
-            // 检查评分是否改善（取当前字段对应评分项的等级）
-            var newGrade = waisgGetFieldGrade(field);
-            if (newGrade === currentGrade && currentGrade !== 'green') {
-                // 未改善：计数 +1
-                stat.count++;
-                stat.lastGrade = currentGrade;
-                showStatus('⚠️ 【' + label + '】已优化但评分仍为 ' + currentGrade + '。可再次点击重试，或手动调整。', 'error');
-            } else {
-                // 改善了：重置计数
-                stat.count = 0;
-                stat.lastGrade = newGrade;
-                showStatus('✅ 【' + label + '】已优化，请检查后点击「更新」保存。', 'success');
-            }
-            waisgRetryStats[field] = stat;
-        }).fail(function () {
-            setLoading(false);
-            showStatus('❌ 请求失败，请重试。', 'error');
-        });
+            }).fail(function () {
+                setLoading(false);
+                showStatus('❌ 请求失败，请重试。', 'error');
+            });
+        }
+        runScoreOptimize(false);
     });
 
     /** 获取字段对应评分项的等级 */

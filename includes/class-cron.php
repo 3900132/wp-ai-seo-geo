@@ -26,8 +26,11 @@ class WAISG_Cron {
 		// AJAX：获取日志与下次执行时间
 		add_action( 'wp_ajax_waisg_get_cron_log', array( $this, 'ajax_get_cron_log' ) );
 
-		// 确保调度状态与设置一致（每次插件加载时检查）
-		$this->maybe_schedule();
+		// 仅在管理后台检查调度状态，避免每次前端访问都查询 wp_next_scheduled（数据库开销）。
+		// 前端访问不应触发调度逻辑；设置变更由 reschedule() 处理，激活/停用由 hook 处理。
+		if ( is_admin() ) {
+			$this->maybe_schedule();
+		}
 	}
 
 	// =========================================================
@@ -123,6 +126,14 @@ class WAISG_Cron {
 		$enabled = WAISG_Settings::get( 'cron_enabled', 0 );
 		if ( ! $enabled ) return;
 
+		// 放宽 PHP 执行时间限制：cron 跑多篇文章 + humanize 耗时较长，
+		// 部分主机默认 30/60s 会中途中断 cron。call() 内会按 timeout 再调一次，
+		// 这里入口先放一次兜底。部分主机禁用该函数时静默失败（@ 抑制）。
+		// 上限 600 秒：避免 AI 请求挂起导致 PHP 进程长时间占用服务器资源。
+		if ( function_exists( 'set_time_limit' ) ) {
+			@set_time_limit( 600 );
+		}
+
 		$per_run    = min( 20, max( 1, absint( WAISG_Settings::get( 'cron_per_run', 5 ) ) ) );
 		$target     = WAISG_Settings::get( 'cron_target', 'oldest' );
 		$post_types = WAISG_Settings::get( 'cron_post_types', array() );
@@ -138,7 +149,6 @@ class WAISG_Cron {
 			return;
 		}
 
-		$meta_box = new WAISG_Meta_Box();
 		$done     = 0;
 		$errors   = array();
 
@@ -149,9 +159,9 @@ class WAISG_Cron {
 				'title'     => $post->post_title,
 				'content'   => $post->post_content,
 				'excerpt'   => $post->post_excerpt,
-				'seo_title' => (string) get_post_meta( $post_id, $meta_box->get_seo_field_name( 'title' ),       true ),
-				'seo_desc'  => (string) get_post_meta( $post_id, $meta_box->get_seo_field_name( 'description' ), true ),
-				'seo_kw'    => (string) get_post_meta( $post_id, $meta_box->get_seo_field_name( 'keywords' ),    true ),
+				'seo_title' => (string) get_post_meta( $post_id, WAISG_Meta_Box::get_seo_field_name( 'title' ),       true ),
+				'seo_desc'  => (string) get_post_meta( $post_id, WAISG_Meta_Box::get_seo_field_name( 'description' ), true ),
+				'seo_kw'    => (string) get_post_meta( $post_id, WAISG_Meta_Box::get_seo_field_name( 'keywords' ),    true ),
 			);
 
 			// 保护原文中的图片，防止 AI 优化时丢失
@@ -177,10 +187,10 @@ class WAISG_Cron {
 				continue;
 			}
 
-			$data = WAISG_AI_API::parse_json_response( $result['text'] );
+			$data = WAISG_AI_API::parse_json_response( $result['text'], 'cron', $post_id );
 			if ( ! $data ) {
 				$errors[] = 'ID ' . $post_id . '：AI 返回格式异常';
-				WAISG_Logger::log( $post_id, 'cron', 'AI 返回格式异常（无法解析 JSON）' );
+				WAISG_Logger::log( $post_id, 'cron', 'AI 返回格式异常（无法解析 JSON）', 'AI返回：' . mb_substr( $result['text'], 0, 300, 'UTF-8' ) );
 				continue;
 			}
 
@@ -190,7 +200,9 @@ class WAISG_Cron {
 			$cron_content = WAISG_AI_API::restore_images( $cron_content, $img_protected['map'] );
 			if ( ! empty( $cron_content ) ) {
 				if ( WAISG_Settings::get( 'humanize_enabled', 0 ) ) {
-					$cron_content = WAISG_AI_API::humanize( $cron_content );
+					// 定时任务模型偏好直接读 batch_model 设置（无前端传参）
+					$cron_use_model = WAISG_Settings::get( 'batch_model', 'main' );
+					$cron_content = WAISG_AI_API::humanize( $cron_content, $cron_use_model );
 				}
 				$cron_content = WAISG_AI_API::filter_ai_phrases( $cron_content );
 			}
@@ -225,8 +237,9 @@ class WAISG_Cron {
 			$done++;
 
 			// AI 调用之间短暂停顿，防止 API 过载
+			// 用 usleep 替代 sleep：部分主机 max_execution_time 会中断 sleep 但不计 usleep
 			if ( $done < count( $posts ) ) {
-				sleep( 2 );
+				usleep( 2000000 ); // 2 秒（微秒）
 			}
 		}
 

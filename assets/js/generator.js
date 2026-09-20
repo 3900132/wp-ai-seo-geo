@@ -80,7 +80,9 @@
     // =========================================================
     function log(msg) {
         var $log = $('#gen-log');
-        $log.append('[' + new Date().toLocaleTimeString() + '] ' + msg + '\n');
+        // 转义 msg 防止 AI 返回的标题/错误信息触发 XSS
+        var safeMsg = $('<div>').text(String(msg == null ? '' : msg)).html();
+        $log.append('[' + new Date().toLocaleTimeString() + '] ' + safeMsg + '\n');
         $log.scrollTop($log[0].scrollHeight);
     }
 
@@ -99,6 +101,7 @@
             language:       $ctx.find('.gen-language-input').val() || 'zh-CN',
             template_id:    parseInt($ctx.find('.gen-template-input').val(), 10) || 0,
             model_override: $ctx.find('.gen-model-override-input').val() || '',
+            skip_humanize:  $ctx.find('.gen-skip-humanize-input').is(':checked') ? 1 : 0,
         };
     }
 
@@ -108,6 +111,11 @@
             .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
     }
 
+    // URL 协议白名单：仅允许 http/https，防止 javascript: 等协议注入
+    function safeUrl(u) {
+        return /^https?:\/\//i.test(String(u || '')) ? String(u) : '#';
+    }
+
     // =========================================================
     // SEO 评分（生成器详情行用）
     // =========================================================
@@ -115,7 +123,7 @@
         var tl  = (title || '').length;
         var stl = (seoT  || '').length;
         var sdl = (seoD  || '').length;
-        var kwLc = ((kw || '').split(',')[0] || '').trim().toLowerCase();
+        var kwLc = ((kw || '').replace(/[，、；;｜|]/g, ',').split(',')[0] || '').trim().toLowerCase();
 
         function grade(len, g1, g2, y1, y2) {
             if (len === 0) return 'gray';
@@ -156,7 +164,7 @@
             + '<option value="publish">立即发布</option>'
             + '<option value="future">定时发布</option>';
 
-        return '<tr class="gen-detail-row" data-history-id="' + historyId + '" style="display:none;">'
+        return '<tr class="gen-detail-row" data-history-id="' + escHtml(historyId) + '" style="display:none;">'
             + '<td colspan="6" style="padding:16px 24px;background:#fafafa;border-top:2px solid #2271b1;">'
             + '<table style="width:100%;border-collapse:collapse;">'
             + detailField('标题',    '<input type="text" class="gd-title large-text" value="' + escHtml(d.post_title) + '" />')
@@ -169,7 +177,7 @@
             + detailField('保存为',
                 '<select class="gd-status">' + statusOptions + '</select>'
                 + '<input type="datetime-local" class="gd-date" style="display:none;margin:0 6px;" />'
-                + '<button type="button" class="gd-save button button-primary" data-history-id="' + historyId + '" style="margin-left:6px;">保存到 WordPress</button>'
+                + '<button type="button" class="gd-save button button-primary" data-history-id="' + escHtml(historyId) + '" style="margin-left:6px;">保存到 WordPress</button>'
                 + '<span class="gd-msg" style="font-size:12px;margin-left:8px;display:none;"></span>'
             )
             + '</table>'
@@ -229,14 +237,14 @@
         } else {
             // 新建主行
             var cbHtml = (status === 'success' && historyId)
-                ? '<input type="checkbox" class="gen-result-check" value="' + historyId + '" />'
+                ? '<input type="checkbox" class="gen-result-check" value="' + escHtml(historyId) + '" />'
                 : '<input type="checkbox" class="gen-result-check" disabled />';
 
             var expandBtn = (status === 'success' && historyId)
                 ? '<button type="button" class="gen-expand-btn button button-small" data-index="' + index + '">编辑/保存</button>'
                 : '<button type="button" class="gen-expand-btn button button-small" disabled>编辑/保存</button>';
 
-            var mainRow = '<tr class="gen-result-row" data-index="' + index + '" data-history-id="' + (historyId || '') + '">'
+            var mainRow = '<tr class="gen-result-row" data-index="' + index + '" data-history-id="' + escHtml(historyId || '') + '">'
                 + '<td class="col-cb">' + cbHtml + '</td>'
                 + '<td>' + index + '</td>'
                 + '<td style="color:#646970;font-size:12px;">' + escHtml(keyword || '') + '</td>'
@@ -248,7 +256,7 @@
             // 详情行（预建，初始隐藏）
             var detailRow = (status === 'success' && historyId && detailData)
                 ? buildDetailRow(historyId, detailData)
-                : '<tr class="gen-detail-row" data-history-id="' + (historyId || index) + '" style="display:none;"><td colspan="6"></td></tr>';
+                : '<tr class="gen-detail-row" data-history-id="' + escHtml(historyId || index) + '" style="display:none;"><td colspan="6"></td></tr>';
 
             $body.append(mainRow + detailRow);
         }
@@ -331,9 +339,9 @@
             if (res.success) {
                 var d = res.data;
                 var labels = { draft: '草稿', publish: '已发布', future: '已定时' };
-                $msg.html('✅ ' + (labels[d.status] || d.status)
-                    + ' &nbsp;<a href="' + d.edit_url + '" target="_blank">编辑</a>'
-                    + (d.view_url ? ' &nbsp;<a href="' + d.view_url + '" target="_blank">查看</a>' : '')
+                $msg.html('✅ ' + escHtml(labels[d.status] || d.status)
+                    + ' &nbsp;<a href="' + escHtml(safeUrl(d.edit_url)) + '" target="_blank">编辑</a>'
+                    + (d.view_url ? ' &nbsp;<a href="' + escHtml(safeUrl(d.view_url)) + '" target="_blank">查看</a>' : '')
                 ).css('color', '#0a6').show();
                 // 更新主行状态
                 var $mainRow = $('#gen-result-body .gen-result-row[data-history-id="' + historyId + '"]');
@@ -566,6 +574,7 @@
                     if (res.success) {
                         var d = res.data;
                         log('✅ 第 ' + task.index + ' 篇成功：' + d.post_title);
+                        if (d.image_note) log('⚠️ 配图：' + d.image_note);
                         upsertResultRow(d.history_id, task.index, task.keyword, d.post_title, 'success', d);
                     } else {
                         var msg = (res.data && res.data.message) ? res.data.message : '未知错误';
@@ -698,6 +707,7 @@
                 category_id:    parseInt($('#gen-rewrite-category').val(), 10) || 0,
                 template_id:    parseInt($('#gen-rewrite-template').val(), 10) || 0,
                 model_override: $('#gen-tab-rewrite .gen-model-override-input').val() || '',
+                skip_humanize:  $('#gen-tab-rewrite .gen-skip-humanize-input').is(':checked') ? 1 : 0,
                 index:          1,
             },
             success: function (res) {
