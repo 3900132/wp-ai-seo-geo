@@ -1142,6 +1142,8 @@ class WAISG_AI_API {
 		//   块级包装（p/div/section/article/main/aside/nav/header/footer）闭合标签 → 空行（保留段落
 		//   结构，前台 wpautop 自动重建 <p>），开标签（含属性/自闭合斜杠）直接剥除；
 		//   行内包装（span/font）开闭标签直接剥除，不产生换行。
+		// v2.0.15 起额外清理「保留标签」上的 class 与 data-* 属性（data-src/data-srcset 懒加载先提升为
+		// src/srcset 再剥除，避免图片失效）。
 		// HTML 注释（图片/嵌入占位符 <!--WAISG_IMG_N-->、Gutenberg 块注释、代码占位符）不含
 		// 标签名，正则天然不匹配，原样保留；pre/code 内容先摘出最后还原，防止代码示例里的
 		// 同名标签（字面文本）被误剥。保留 h1-h6、列表、表格、img/a/strong/em/blockquote 等语义标签。
@@ -1173,6 +1175,53 @@ class WAISG_AI_API {
 
 			// 行内包装标签：开闭均剥除，不产生换行
 			$stripped = preg_replace( '#</?(?:span|font)\b[^>]*>#i', '', $html );
+			if ( $stripped !== null ) $html = $stripped;
+
+			// —— 属性级清理（v2.0.15 新增）——
+			// 「清理无用标签」不仅要剥掉无语义标签，也要清掉「保留标签」（img/a/h2/table/li…）上
+			// 残留的 class="…" 与 data-src/data-srcset 等懒加载属性，否则脏属性会随语义标签写入正文，
+			// 在块编辑器里仍触发「经典块」、前台样式失控。因 pre/code 已在前面摘出为占位符，此处不会
+			// 误伤代码示例里的字面 class=/data-src=。
+			// 图片懒加载常把真实地址放 data-src、src 放占位图，故先把 data-src/data-srcset 提升为
+			// src/srcset（仅当 src 缺失或为 data:/blank/placeholder/lazy/spacer 等占位）再统一剥除 data-*，
+			// 避免清理后图片失效。
+			$stripped = preg_replace_callback(
+				'#<img\b[^>]*>#i',
+				function ( $m ) {
+					$tag = $m[0];
+					$get = function ( $attr ) use ( $tag ) {
+						return preg_match( '#\s' . $attr . '\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)#i', $tag, $x )
+							? trim( $x[1], "\"'" ) : null;
+					};
+					$dsrc    = $get( 'data-src' );
+					$dsrcset = $get( 'data-srcset' );
+					$src     = $get( 'src' );
+					// data-src → src：无 src 直接补；src 为空或占位图时顶替
+					if ( null !== $dsrc && '' !== $dsrc ) {
+						$is_placeholder = ( null === $src || '' === $src
+							|| preg_match( '#^data:|blank|placeholder|lazy|spacer|1x1|loading#i', $src ) );
+						if ( $is_placeholder ) {
+							if ( null === $src ) {
+								$tag = preg_replace( '#<img\b#i', '<img src="' . esc_attr( $dsrc ) . '"', $tag, 1 );
+							} else {
+								$tag = preg_replace( '#\ssrc\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)#i', ' src="' . esc_attr( $dsrc ) . '"', $tag, 1 );
+							}
+						}
+					}
+					// data-srcset → srcset：仅当原无 srcset
+					if ( null !== $dsrcset && '' !== $dsrcset && ! preg_match( '#\ssrcset\s*=#i', $tag ) ) {
+						$tag = preg_replace( '#<img\b#i', '<img srcset="' . esc_attr( $dsrcset ) . '"', $tag, 1 );
+					}
+					return $tag;
+				},
+				$html
+			);
+			if ( $stripped !== null ) $html = $stripped;  // null = 回溯溢出，保留原值
+
+			// 统一剥除保留标签上的 class 与全部 data-* 属性（含 data-src/data-srcset 等懒加载）
+			$stripped = preg_replace( '#\sclass\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)#i', '', $html );
+			if ( $stripped !== null ) $html = $stripped;
+			$stripped = preg_replace( '#\sdata-[\w-]+\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)#i', '', $html );
 			if ( $stripped !== null ) $html = $stripped;
 
 			// 剥除后孤立成行的 &nbsp;（原 <p>&nbsp;</p> 空段落残留）整行删除，避免幽灵空白行；

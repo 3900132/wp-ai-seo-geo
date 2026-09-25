@@ -273,12 +273,14 @@ $enabled_types = $opts['post_types'] ?? array( 'post', 'page' );
 						<label>
 							<input type="checkbox" name="waisg_settings[strip_wrapper_tags]" value="1"
 								<?php checked( $opts['strip_wrapper_tags'] ?? 1, 1 ); ?> />
-							自动清除 AI 返回正文中的 div/p/span 等无语义包装标签（推荐开启）
+							自动清除 AI 返回正文中的 div/p/span 等无语义包装标签及残留 class/data-src 属性（推荐开启）
 						</label>
 						<p class="description">
 							开启后，AI 生成与优化的正文会自动剥除 div/p/span/font/section 等包装标签：闭合标签转为空行保留段落结构，
 							WordPress 前台会依据空行自动重建段落，显示效果不变；h2/h3、列表、表格、图片、链接等语义标签原样保留。
-							可避免块编辑器全篇落入「经典块」后残留无效布局标签导致前台样式失控。关闭则保留 AI 返回的原始 HTML 结构。
+							同时会清掉这些保留标签上残留的 class 与 data-*（含 data-src/data-srcset 懒加载）属性——懒加载图片会先把
+							data-src 提升为 src 再剥除，避免图片失效。可避免块编辑器全篇落入「经典块」后残留无效布局标签导致前台样式失控。
+							关闭则保留 AI 返回的原始 HTML 结构。
 						</p>
 					</td>
 				</tr>
@@ -665,15 +667,30 @@ $enabled_types = $opts['post_types'] ?? array( 'post', 'page' );
 						</label>
 					</td>
 				</tr>
+				<tr id="waisg-schema-publisher-logo-row">
+					<th><label for="waisg_schema_publisher_logo">发布者 Logo URL</label></th>
+					<td>
+						<input type="url" id="waisg_schema_publisher_logo" name="waisg_settings[schema_publisher_logo]"
+							value="<?php echo esc_attr( $opts['schema_publisher_logo'] ?? '' ); ?>"
+							class="regular-text" placeholder="https://example.com/logo.png" />
+						<p class="description">
+							用于 Article Schema 的 <code>publisher.logo</code>，代表<strong>网站机构品牌</strong>（不是文章封面图）。<br>
+							降级顺序：<strong>此处手动设置 → 主题原生站点 Logo（自定义器 custom_logo）→ 站点图标（Site Icon）</strong>。<br>
+							三者均无则 publisher 不输出 logo 字段。本地媒体库图片会自动带上真实宽高。<br>
+							<strong>建议</strong>：优先在此手动填写清晰的矩形品牌 Logo；站点图标为强制正方形，仅作最末兜底，效果不如专门的品牌 Logo。
+						</p>
+					</td>
+				</tr>
 				<tr id="waisg-schema-default-image-row">
-					<th><label for="waisg_schema_default_image">默认图 URL</label></th>
+					<th><label for="waisg_schema_default_image">文章默认封面图 URL</label></th>
 					<td>
 						<input type="url" id="waisg_schema_default_image" name="waisg_settings[schema_default_image]"
 							value="<?php echo esc_attr( $opts['schema_default_image'] ?? '' ); ?>"
 							class="regular-text" placeholder="https://example.com/default-og.jpg" />
 						<p class="description">
-							Article Schema 图片四层兜底：特色图 → 正文第一张图 → 站点 Logo → 此默认图。<br>
-							若此处留空且前三层均无图片，则 image 字段不输出（避免无效链接）。
+							Article Schema <code>image</code> 字段（<strong>文章封面</strong>）三层降级：特色图 → 正文第一张图 → 此默认封面图。<br>
+							纯文本无图文章走到此层：<strong>不再用站点 Logo 兜底</strong>（Logo 仅用于上方 publisher 品牌标识）。<br>
+							若此处留空且前两层均无图片，则 image 字段不输出（避免无效链接）。
 						</p>
 					</td>
 				</tr>

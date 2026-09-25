@@ -1,6 +1,6 @@
 # WP AI SEO + GEO 智能优化 — 完整文档
 
-> 版本 2.0.13 · 作者 [ivye](https://www.3520.net) · 支持 WordPress 5.0+
+> 版本 2.0.15 · 作者 [ivye](https://www.3520.net) · 支持 WordPress 5.0+
 
 ---
 
@@ -127,7 +127,7 @@ API 配置区底部展示累计 Token 消耗量：
   - **轻量模型**：使用轻量模型（需先在基本设置中配置），可大幅降低 API 费用
   - 此设置为全局默认值，在批量优化页面和 AI 文章生成页面上也有独立的「使用模型」下拉框，可临时覆盖全局设置
   - 优先级：**操作页面选择 > 全局设置默认值**
-- **清理无用标签**（v2.0.11 新增）：勾选后自动剥除 AI 生成/优化正文中的 div/p/span/font/section 等无语义包装标签。闭合标签转为空行保留段落结构（WordPress 前台会依据空行自动重建段落，显示效果不变），h2/h3、列表、表格、图片、链接、pre/code 代码块等语义内容原样保留。可避免块编辑器全篇落入「经典块」后残留无效布局标签导致前台样式失控。默认开启；同时所有正文 Prompt 会禁止 AI 输出这类标签（从源头减少）
+- **清理无用标签**（v2.0.11 新增，v2.0.15 增强）：勾选后自动剥除 AI 生成/优化正文中的 div/p/span/font/section 等无语义包装标签。闭合标签转为空行保留段落结构（WordPress 前台会依据空行自动重建段落，显示效果不变），h2/h3、列表、表格、图片、链接、pre/code 代码块等语义内容原样保留。v2.0.15 起还会清掉这些保留标签上残留的 `class` 与 `data-*`（含 `data-src`/`data-srcset` 懒加载）属性——懒加载图片会先把 `data-src` 提升为 `src` 再剥除，避免图片失效。可避免块编辑器全篇落入「经典块」后残留无效布局标签导致前台样式失控。默认开启；同时所有正文 Prompt 会禁止 AI 输出这类标签（从源头减少）
 - **降低 AI 痕迹**：勾选后启用内容润色功能。所有 AI 生成/优化的正文内容会经过二次润色，打散 AI 写作痕迹，降低被 AI 检测工具识别的概率。会额外消耗一次 API 调用，使用的模型由下方「润色模型」决定，默认关闭
 - **润色模型**（v1.9.0 新增）：控制「降低 AI 痕迹」这一步使用哪个模型
   - **轻量模型**：默认值，最省 Token、速度最快（需先在基本设置中配置轻量模型）
@@ -172,14 +172,17 @@ AI 生成文章时自动插入配图，支持三种来源：
 | FAQPage Schema | 自动提取正文 FAQ 区块（`<h3>`问题 + 后续段落答案），生成 FAQPage JSON-LD。配合 AI 优化生成的 FAQ 结构使用 |
 | 全站基础 Schema | 输出 WebSite + BreadcrumbList + Article/WebPage。完整替代主题 functions.php 中的手动 Schema 代码 |
 | Schema 类型开关 | WebSite / BreadcrumbList / Article 三个类型可独立启用/关闭 |
-| 默认图 URL | Article Schema 图片四层兜底：特色图 → 正文第一张图 → 站点 Logo → 此默认图。留空且前三层无图时 image 不输出 |
+| 发布者 Logo URL（v2.0.14 新增）| 用于 `publisher.logo`（网站机构品牌，非文章封面）。三级降级：此处手动设置 → 主题原生站点 Logo（`custom_logo`）→ 站点图标（Site Icon）。三者均无则 publisher 不输出 logo 字段 |
+| 文章默认封面图 URL | 用于 `Article.image`（文章封面）。三级降级：特色图 → 正文第一张图 → 此默认封面图。留空且前两层无图时 image 不输出。**纯文本无图文章不再用站点 Logo 兜底封面** |
 | Canonical URL | 自动为所有页面添加 `<link rel="canonical">` 标签，防止重复 URL 导致搜索引擎权重分散 |
 
 **Schema 注意事项**：
 - 启用全站基础 Schema 后，需先移除主题中原有的 Schema 输出代码，避免重复
-- Publisher logo 尺寸固定 600×600
+- 发布者 Logo 与文章封面图彻底解耦（v2.0.14）：Logo 代表机构品牌走 `publisher.logo`，封面走 `Article.image`，互不串用
+- `publisher.logo` 与 `Article.image` 均输出为 `ImageObject`，本地媒体库图片自动带真实宽高（不再固定 600×600），非本地图片则省略宽高
+- 站点图标为强制正方形，仅作 Logo 最末兜底，建议优先手动填写矩形品牌 Logo
 - FAQ 提取失败时静默跳过，不阻断页面渲染
-- 默认图 URL 未设置时，image 字段留空不输出无效链接
+- 默认封面图 URL 未设置时，image 字段留空不输出无效链接
 
 **Canonical URL 说明**：
 - 覆盖所有页面类型：单篇文章/页面、首页、分类/标签归档、文章类型归档、作者页、日期归档
@@ -787,7 +790,7 @@ WAISG_Settings::update_reasoning_model( string $model, bool $is_reasoning ): voi
 
 | key | 类型 | 说明 |
 |-----|------|------|
-| `waisg_settings` | array | 全部设置项（含 `lightweight_model`、`humanize_enabled`、`humanize_prompt`、`humanize_model`、`ai_phrases_enabled`、`ai_phrases_custom`、`schema_faq_enabled`、`schema_base_enabled`、`schema_website`、`schema_breadcrumb`、`schema_article`、`schema_default_image`、`canonical_enabled`、`reasoning_models`（v1.9.1 新增，string[]，测试连接实测探测的推理模型名单）等） |
+| `waisg_settings` | array | 全部设置项（含 `lightweight_model`、`humanize_enabled`、`humanize_prompt`、`humanize_model`、`ai_phrases_enabled`、`ai_phrases_custom`、`schema_faq_enabled`、`schema_base_enabled`、`schema_website`、`schema_breadcrumb`、`schema_article`、`schema_publisher_logo`（v2.0.14 新增，发布者 Logo URL）、`schema_default_image`、`canonical_enabled`、`reasoning_models`（v1.9.1 新增，string[]，测试连接实测探测的推理模型名单）等） |
 | `waisg_token_stats` | array | `{total, month, monthly}` |
 | `waisg_content_templates` | string(JSON) | 内容结构模板列表 |
 | `waisg_cron_log` | array | `{last_run, last_count, note}` |
@@ -921,11 +924,18 @@ $schema->output_canonical(): void
 | 全站 Schema | `schema_base_enabled` | WebSite / BreadcrumbList / Article（各有独立开关） |
 | Canonical URL | `canonical_enabled` | `<link rel="canonical" href="...">` |
 
-**Article Schema 图片四层兜底**：
-1. `has_post_thumbnail()` → 特色图
-2. 正文第一个 `<img>` 标签（含相对路径转绝对路径）
-3. 站点 Logo（`custom_logo`）
-4. 设置中的 `schema_default_image`（留空则不输出 image 字段）
+**发布者 Logo（`publisher.logo`）三级降级**（v2.0.14 起，代表网站机构品牌，与文章封面解耦）：
+1. 设置中的 `schema_publisher_logo`（手动填写的品牌 Logo URL）
+2. 主题原生站点 Logo `get_theme_mod('custom_logo')`（自定义器上传，兼容所有主题）
+3. 站点图标 `get_site_icon_url()`（Site Icon 最末兜底）
+> 三者均无则 publisher 不带 logo 字段；输出为 `ImageObject`，本地附件带真实宽高，非本地图片省略宽高。
+
+**文章封面图（`Article.image`）三级降级**（v2.0.14 起，输出 `ImageObject`）：
+1. `has_post_thumbnail()` / `get_post_thumbnail_id()` → 特色图（附件元数据取真实宽高）
+2. 正文第一个 `<img>` 标签（含相对路径转绝对路径，本地附件自动解析宽高）
+3. 设置中的 `schema_default_image`（留空则不输出 image 字段）
+> **不再用站点 Logo 兜底封面**——纯文本无图文章的 image 直接省略，避免把机构 Logo 错配为文章封面。
+> 本地附件宽高反查（`attachment_url_to_postid`）用 transient 缓存 12 小时，避免每次页面渲染重复查库。
 
 **Canonical URL 覆盖页面**：singular / front_page / home / category / tag / taxonomy / post_type_archive / author / date / paged（指向第一页）
 
@@ -1219,6 +1229,58 @@ public static function maybe_migrate() {
 ---
 
 ## 19. 更新日志
+
+### v2.0.15
+
+#### 功能增强：「清理无用标签」扩展到属性级（清除保留标签上的 class 与 data-* 懒加载属性）
+
+**问题**：v2.0.11 的「清理无用标签」只剥除 div/p/span/section 等无语义**标签**，但保留下来的语义标签（img/a/h2/table/li 等）上残留的 `class="…"` 与 `data-src`/`data-srcset` 等懒加载属性并未清理，脏属性仍随正文写入数据库，块编辑器里依旧触发「经典块」、前台样式失控。
+
+**增强内容 — `includes/class-ai-api.php` `sanitize_content()`**
+- 在包装标签剥除之后、pre/code 还原之前，新增属性级清理：统一剥除保留标签上的 `class` 与全部 `data-*` 属性（含 `data-src`/`data-srcset`）。因 pre/code 已提前摘出为占位符，代码示例里的字面 `class=`/`data-src=` 不会被误伤。
+- **懒加载图片不失效**：先把 `<img>` 的 `data-src`/`data-srcset` 提升为 `src`/`srcset`（仅当 `src` 缺失或为 `data:`/`blank`/`placeholder`/`lazy`/`spacer` 等占位图），再统一剥除 `data-*`，避免清理后图片地址丢失。
+- 受设置页「清理无用标签」开关统一控制（默认开启），关闭则完全保留原始 HTML 与属性。
+
+**验证**：PHP 8.0.2 `php -l` 通过。
+
+#### 文件变更清单
+
+| 文件 | 变更类型 | 说明 |
+|------|----------|------|
+| `includes/class-ai-api.php` | 修改 | `sanitize_content()` 包装标签剥除后新增 class/data-* 属性清理，懒加载 data-src/data-srcset 先提升为 src/srcset 再剥除 |
+| `admin/views/settings.php` | 修改 | 「清理无用标签」开关说明补充属性级清理与懒加载处理 |
+| `wp-ai-seo-geo.php` | 修改 | 版本号升至 2.0.15 |
+| `README.md` | 修改 | 版本号 + 基本设置章节「清理无用标签」说明更新 + v2.0.15 更新日志 |
+
+### v2.0.14
+
+#### 功能升级：Schema 发布者 Logo 与文章封面图彻底解耦
+
+**问题**：旧版 `Article` Schema 把「站点 Logo」塞进图片四层兜底（特色图 → 正文首图 → 站点 Logo → 默认图），导致纯文本无图文章把机构 Logo 错配成文章封面；且 `publisher.logo` 只认 `custom_logo`、宽高写死 600×600，主题不支持 custom-logo 时无 Logo 可用。
+
+**升级内容 — `includes/class-schema.php`**
+- **发布者 Logo（`publisher.logo`）独立三级降级**：手动设置 `schema_publisher_logo` → 主题原生 `custom_logo` → 站点图标 `get_site_icon_url()`。三者均无则 publisher 不带 logo 字段。新增 `get_publisher()` / `get_publisher_logo()`。
+- **文章封面图（`Article.image`）三级降级**：特色图 → 正文第一张图 → 手动默认封面图 `schema_default_image`。**移除站点 Logo 兜底层**，纯文本无图文章不再错配 Logo，全无图时 image 直接省略。
+- **`ImageObject` + 真实宽高**：Logo 与封面图统一输出为 `ImageObject`（新增 `build_image_object()`）。特色图用附件元数据取宽高，其余 URL 用 `resolve_local_image_dimensions()`（`attachment_url_to_postid`）解析本地附件宽高；非本地图片省略宽高。不再写死 600×600。
+- **性能**：本地附件宽高反查用 transient 缓存 12 小时（`waisg_imgdim_` + `md5(url)`，未命中存 `none` 标记），避免每次页面渲染重复查库。
+
+**设置项 — `includes/class-settings.php` + `admin/views/settings.php`**
+- 新增 `schema_publisher_logo` 字段（`esc_url_raw` 清洗）。
+- 设置页新增「发布者 Logo URL」行（说明三级降级 + 建议手动填矩形品牌 Logo，站点图标为正方形仅作兜底）；原「默认图 URL」行改名「文章默认封面图 URL」，说明改为三层、明确不再用 Logo 兜底封面。
+
+**验证**：PHP 8.0.2 `php -l` 通过（三个文件均无语法错误）。
+
+#### 文件变更清单
+
+| 文件 | 变更类型 | 说明 |
+|------|----------|------|
+| `includes/class-schema.php` | 修改 | Publisher/封面图解耦；新增 `get_publisher`/`get_publisher_logo`/`build_image_object`/`resolve_local_image_dimensions`（含缓存）；`get_article_image` 改三级并输出 ImageObject |
+| `includes/class-settings.php` | 修改 | 注册并清洗 `schema_publisher_logo` 字段 |
+| `admin/views/settings.php` | 修改 | 新增「发布者 Logo URL」设置行；默认图行改名 + 说明更新 |
+| `wp-ai-seo-geo.php` | 修改 | 版本号升至 2.0.14 |
+| `README.md` | 修改 | 版本号 + Schema 章节说明更新 + v2.0.14 更新日志 |
+
+---
 
 ### v2.0.13
 

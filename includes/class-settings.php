@@ -180,6 +180,10 @@ class WAISG_Settings {
 		$clean['schema_website']       = ! empty( $input['schema_website'] )      ? 1 : 0;
 		$clean['schema_breadcrumb']    = ! empty( $input['schema_breadcrumb'] )   ? 1 : 0;
 		$clean['schema_article']       = ! empty( $input['schema_article'] )      ? 1 : 0;
+		// 发布者 Logo（publisher.logo，机构品牌）与文章默认封面图（Article.image）彻底解耦：
+		// - schema_publisher_logo：手动设置的品牌 Logo，为空时读侧再降级到 custom_logo / 站点图标
+		// - schema_default_image：文章封面兜底，仅在特色图/正文首图都没有时使用，不再错配 Logo
+		$clean['schema_publisher_logo'] = esc_url_raw( trim( $input['schema_publisher_logo'] ?? '' ) );
 		$clean['schema_default_image'] = esc_url_raw( trim( $input['schema_default_image'] ?? '' ) );
 		$clean['canonical_enabled']    = ! empty( $input['canonical_enabled'] ) ? 1 : 0;
 

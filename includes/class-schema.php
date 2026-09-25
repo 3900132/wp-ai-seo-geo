@@ -3,7 +3,9 @@
  * Schema 结构化数据自动注入
  *
  * 1. FAQPage Schema：提取文章中 <h3>问题</h3> + 后续段落答案，生成 FAQPage JSON-LD
- * 2. 全站基础 Schema：WebSite + BreadcrumbList + Article/WebPage（含四层图片兜底）
+ * 2. 全站基础 Schema：WebSite + BreadcrumbList + Article/WebPage
+ *    - publisher.logo（机构品牌）：手动设置 → custom_logo → 站点图标 兜底
+ *    - Article.image（文章封面）：特色图 → 正文第一张图 → 手动默认封面图 兜底
  *
  * 所有输出通过 wp_head hook，不修改文章内容。
  */
@@ -297,7 +299,7 @@ class WAISG_Schema {
 	}
 
 	/**
-	 * 输出 Article / WebPage Schema（含四层图片兜底 + publisher + author）
+	 * 输出 Article / WebPage Schema（publisher 品牌 Logo + 文章封面图三层兜底 + author）
 	 */
 	private function output_article( $site_name, $home_url ) {
 		global $post;
@@ -312,30 +314,11 @@ class WAISG_Schema {
 			'url'           => get_permalink(),
 		);
 
-		// ── Publisher（含 logo 600x600）────────────────────
-		$logo_id  = get_theme_mod( 'custom_logo' );
-		$logo_url = $logo_id ? wp_get_attachment_image_url( $logo_id, 'full' ) : '';
+		// ── Publisher（机构品牌，含品牌 Logo）──────────────
+		$data['publisher'] = $this->get_publisher( $site_name );
 
-		if ( $logo_url ) {
-			$data['publisher'] = array(
-				'@type' => 'Organization',
-				'name'  => $site_name,
-				'logo'  => array(
-					'@type'  => 'ImageObject',
-					'url'    => $logo_url,
-					'width'  => 600,
-					'height' => 600,
-				),
-			);
-		} else {
-			$data['publisher'] = array(
-				'@type' => 'Organization',
-				'name'  => $site_name,
-			);
-		}
-
-		// ── Image 四层兜底 ────────────────────────────────
-		$image = $this->get_article_image( $post, $logo_url );
+		// ── Image（文章封面，与品牌 Logo 解耦）────────────
+		$image = $this->get_article_image( $post );
 		if ( $image ) {
 			$data['image'] = $image;
 		}
@@ -367,24 +350,157 @@ class WAISG_Schema {
 	}
 
 	/**
-	 * 四层兜底获取文章图片
+	 * 构建 Publisher（Organization）数据，含机构品牌 Logo。
+	 *
+	 * @param string $site_name 站点名
+	 * @return array
+	 */
+	private function get_publisher( $site_name ) {
+		$publisher = array(
+			'@type' => 'Organization',
+			'name'  => $site_name,
+		);
+
+		$logo = $this->get_publisher_logo();
+		if ( $logo ) {
+			$publisher['logo'] = $logo;
+		}
+
+		return $publisher;
+	}
+
+	/**
+	 * 获取发布者 Logo（publisher.logo），代表网站机构品牌，与文章封面图无关。
+	 *
+	 * 降级顺序：
+	 *   1. 手动设置的 Publisher Logo（schema_publisher_logo）
+	 *   2. 主题原生站点 Logo（自定义器 custom_logo，兼容所有主题）
+	 *   3. 站点图标 Site Icon（get_site_icon_url，最终兜底）
+	 *
+	 * 三者均无则返回 false（publisher 不带 logo 字段）。
+	 *
+	 * @return array|false ImageObject 数组（含可解析到的真实宽高），无 Logo 时 false
+	 */
+	private function get_publisher_logo() {
+		// 层级1：手动设置的 Publisher Logo（纯 URL，尝试解析本地附件尺寸）
+		$manual = WAISG_Settings::get( 'schema_publisher_logo', '' );
+		if ( ! empty( $manual ) ) {
+			return $this->build_image_object( $manual );
+		}
+
+		// 层级2：主题原生 custom_logo（自定义器上传，所有主题通用）
+		$logo_id = get_theme_mod( 'custom_logo' );
+		if ( $logo_id ) {
+			$url = wp_get_attachment_image_url( $logo_id, 'full' );
+			if ( $url ) {
+				$meta = wp_get_attachment_metadata( $logo_id );
+				$w = ! empty( $meta['width'] )  ? (int) $meta['width']  : 0;
+				$h = ! empty( $meta['height'] ) ? (int) $meta['height'] : 0;
+				return $this->build_image_object( $url, $w, $h );
+			}
+		}
+
+		// 层级3：站点图标 Site Icon 兜底（外观→自定义→站点图标处设置）
+		if ( function_exists( 'has_site_icon' ) && has_site_icon() ) {
+			$url = get_site_icon_url( 512 );
+			if ( $url ) {
+				return $this->build_image_object( $url, 512, 512 );
+			}
+		}
+
+		return false;
+	}
+
+	/**
+	 * 构建 ImageObject（供 publisher.logo 与 Article.image 共用）。
+	 * 宽高未知时尝试从本地附件解析，仍拿不到则省略 width/height（Google 允许）。
+	 *
+	 * @param string $url    图片 URL
+	 * @param int    $width  已知宽（像素），0 表示未知
+	 * @param int    $height 已知高（像素），0 表示未知
+	 * @return array ImageObject 数组
+	 */
+	private function build_image_object( $url, $width = 0, $height = 0 ) {
+		if ( $width <= 0 || $height <= 0 ) {
+			$dims = $this->resolve_local_image_dimensions( $url );
+			if ( $dims ) {
+				$width  = $dims[0];
+				$height = $dims[1];
+			}
+		}
+
+		$obj = array(
+			'@type' => 'ImageObject',
+			'url'   => $url,
+		);
+		if ( $width > 0 && $height > 0 ) {
+			$obj['width']  = (int) $width;
+			$obj['height'] = (int) $height;
+		}
+
+		return $obj;
+	}
+
+	/**
+	 * 尝试把图片 URL 解析为本地附件的真实宽高（非本地附件返回 false）。
+	 *
+	 * attachment_url_to_postid() 每次都会查库，且本方法在每个开启基础 Schema 的单页渲染时
+	 * 都可能被 Logo / 封面图调用——用 transient 缓存反查结果（命中的宽高数组或未命中标记），
+	 * 避免重复查询。缓存 12 小时：媒体库替换同名图后最迟 12h 生效，兼顾性能与新鲜度。
+	 *
+	 * @param string $url 图片 URL
+	 * @return array|false [width, height] 或 false
+	 */
+	private function resolve_local_image_dimensions( $url ) {
+		if ( empty( $url ) ) return false;
+
+		$cache_key = 'waisg_imgdim_' . md5( $url );
+		$cached    = get_transient( $cache_key );
+		// get_transient 未命中返回 false；我们把"查过但无尺寸"存成 'none' 以区分，避免每次重查
+		if ( $cached !== false ) {
+			return is_array( $cached ) ? $cached : false;
+		}
+
+		$result = false;
+		$id     = attachment_url_to_postid( $url );
+		if ( $id ) {
+			$meta = wp_get_attachment_metadata( $id );
+			if ( ! empty( $meta['width'] ) && ! empty( $meta['height'] ) ) {
+				$result = array( (int) $meta['width'], (int) $meta['height'] );
+			}
+		}
+
+		set_transient( $cache_key, $result === false ? 'none' : $result, 12 * HOUR_IN_SECONDS );
+		return $result;
+	}
+
+	/**
+	 * 文章封面图三层梯级降级（与 publisher 品牌 Logo 彻底解耦），返回 ImageObject。
 	 *
 	 * 1. 特色图
 	 * 2. 正文第一张图
-	 * 3. 站点 Logo
-	 * 4. 默认图（设置中配置）
+	 * 3. 手动设置的默认封面图（schema_default_image）
+	 *
+	 * 纯文本无图文章走到第三层：留空则不输出 image，不再把站点 Logo 错配为文章封面。
+	 * 可解析到真实宽高时带上（贴合 Google 富结果对 image 的推荐），拿不到则只给 url。
 	 *
 	 * @param WP_Post $post
-	 * @param string  $logo_url 站点 Logo URL
-	 * @return string|false 图片 URL，未设置默认图时返回 false
+	 * @return array|false ImageObject 数组，全部无图时返回 false
 	 */
-	private function get_article_image( $post, $logo_url ) {
-		// 层级1：特色图
-		if ( has_post_thumbnail( $post->ID ) ) {
-			return get_the_post_thumbnail_url( $post->ID, 'full' );
+	private function get_article_image( $post ) {
+		// 层级1：特色图（直接用缩略图附件 ID 取真实宽高）
+		$thumb_id = get_post_thumbnail_id( $post->ID );
+		if ( $thumb_id ) {
+			$url = wp_get_attachment_image_url( $thumb_id, 'full' );
+			if ( $url ) {
+				$meta = wp_get_attachment_metadata( $thumb_id );
+				$w = ! empty( $meta['width'] )  ? (int) $meta['width']  : 0;
+				$h = ! empty( $meta['height'] ) ? (int) $meta['height'] : 0;
+				return $this->build_image_object( $url, $w, $h );
+			}
 		}
 
-		// 层级2：正文第一张图
+		// 层级2：正文第一张图（本地附件会自动解析宽高）
 		if ( ! empty( $post->post_content ) ) {
 			if ( preg_match( '/<img\s[^>]*src=["\']([^"\']+)["\']/i', $post->post_content, $matches ) ) {
 				$img_url = $matches[1];
@@ -392,18 +508,13 @@ class WAISG_Schema {
 				if ( strpos( $img_url, 'http' ) !== 0 ) {
 					$img_url = home_url( $img_url );
 				}
-				return $img_url;
+				return $this->build_image_object( $img_url );
 			}
 		}
 
-		// 层级3：站点 Logo
-		if ( ! empty( $logo_url ) ) {
-			return $logo_url;
-		}
-
-		// 层级4：设置中的默认图（留空则不输出，避免无效链接）
+		// 层级3：设置中手动配置的默认封面图（留空则不输出，避免无效链接）
 		$default = WAISG_Settings::get( 'schema_default_image', '' );
-		return ! empty( $default ) ? $default : false;
+		return ! empty( $default ) ? $this->build_image_object( $default ) : false;
 	}
 
 	// ================================================================

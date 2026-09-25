@@ -2,7 +2,7 @@
 /**
  * Plugin Name: WordPress AI SEO + GEO 智能优化
  * Description: 对 WordPress 全站内容实现 AI 生成 + AI 优化，同时完成 SEO 与 GEO 两大优化方向。
- * Version:     2.0.13
+ * Version:     2.0.15
  * Author:      ivye
  * Author URI:  https://www.3520.net
  * License:     GPL v2 or later
@@ -15,7 +15,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WAISG_VERSION',  '2.0.13' );
+define( 'WAISG_VERSION',  '2.0.15' );
 define( 'WAISG_FILE',     __FILE__ );
 define( 'WAISG_DIR',      plugin_dir_path( __FILE__ ) );
 define( 'WAISG_URL',      plugin_dir_url( __FILE__ ) );
